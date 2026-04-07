@@ -121,6 +121,10 @@ export class CaptureOrchestrator extends EventEmitter {
     await this.audio.handleChunk(buffer);
   }
 
+  onMicLevel(level: number): void {
+    this.audio.onMicLevel(level);
+  }
+
   private handleEvent(event: CaptureEvent): void {
     this.session.recordActivity();
     this.storage.appendEvent(event);

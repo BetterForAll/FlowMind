@@ -62,16 +62,29 @@ const api = {
     return () => ipcRenderer.removeListener("capture:stats", listener);
   },
 
-  // Audio capture (renderer-side recording)
-  onAudioStart: (callback: () => void) => {
+  // Audio capture (renderer-side)
+  onAudioStartMonitoring: (callback: () => void) => {
     const listener = () => callback();
-    ipcRenderer.on("audio:start", listener);
-    return () => ipcRenderer.removeListener("audio:start", listener);
+    ipcRenderer.on("audio:startMonitoring", listener);
+    return () => ipcRenderer.removeListener("audio:startMonitoring", listener);
   },
-  onAudioStop: (callback: () => void) => {
+  onAudioStopMonitoring: (callback: () => void) => {
     const listener = () => callback();
-    ipcRenderer.on("audio:stop", listener);
-    return () => ipcRenderer.removeListener("audio:stop", listener);
+    ipcRenderer.on("audio:stopMonitoring", listener);
+    return () => ipcRenderer.removeListener("audio:stopMonitoring", listener);
+  },
+  onAudioStartRecording: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("audio:startRecording", listener);
+    return () => ipcRenderer.removeListener("audio:startRecording", listener);
+  },
+  onAudioStopRecording: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("audio:stopRecording", listener);
+    return () => ipcRenderer.removeListener("audio:stopRecording", listener);
+  },
+  sendMicLevel: (level: number) => {
+    ipcRenderer.send("audio:micLevel", level);
   },
   sendAudioChunk: (buffer: ArrayBuffer) => {
     ipcRenderer.send("audio:chunk", Buffer.from(buffer));
