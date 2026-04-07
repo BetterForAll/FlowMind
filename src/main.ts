@@ -78,6 +78,7 @@ function updateTrayMenu(): void {
       click: async () => {
         if (isCapturing) {
           await captureOrchestrator.stop();
+          runDetection();
         } else {
           await captureOrchestrator.start();
         }
@@ -177,6 +178,8 @@ function setupIPC(): void {
   ipcMain.handle("capture:stop", async () => {
     await captureOrchestrator.stop();
     updateTrayMenu();
+    // Auto-run detection after capture stops
+    runDetection();
   });
 
   ipcMain.handle("capture:getStats", () => {
