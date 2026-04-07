@@ -149,6 +149,11 @@ export class CaptureStorage {
         ? (await fsp.readdir(ssDir)).filter((f) => f.endsWith(".jpg")).length
         : 0;
 
+      const audioDir = path.join(sessionPath, "audio");
+      const audioChunkCount = fs.existsSync(audioDir)
+        ? (await fsp.readdir(audioDir)).filter((f) => f.endsWith(".webm")).length
+        : 0;
+
       const sizeBytes = await CaptureStorage.getDirSize(sessionPath);
 
       // Check if analyzed marker exists
@@ -162,6 +167,7 @@ export class CaptureStorage {
         endedAt,
         eventCount,
         screenshotCount,
+        audioChunkCount,
         sizeBytes,
         analyzed,
       };
@@ -245,6 +251,7 @@ export interface SessionInfo {
   endedAt: string | null;
   eventCount: number;
   screenshotCount: number;
+  audioChunkCount: number;
   sizeBytes: number;
   analyzed: boolean;
 }

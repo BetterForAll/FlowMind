@@ -43,8 +43,8 @@ export function RawDataView() {
     loadData();
 
     // Refresh when detection completes (new sessions may appear or get analyzed)
-    const unsub = window.flowmind.onDetectionResults(() => loadData());
-    return () => unsub();
+    const unsub = window.flowmind.onDetectionResults(() => { loadData(); });
+    return () => { unsub(); };
   }, [loadData]);
 
   const toggleSession = async (session: SessionInfo) => {
@@ -130,10 +130,13 @@ export function RawDataView() {
                   </div>
                 </div>
                 <div className="flow-meta">
+                  <span>{new Date(session.startedAt).toLocaleString()}</span>
                   <span>{formatDuration(session.startedAt, session.endedAt)}</span>
                   <span>{session.eventCount} events</span>
                   <span>{session.screenshotCount} screenshots</span>
-                  <span>{new Date(session.startedAt).toLocaleTimeString()}</span>
+                  {session.audioChunkCount > 0 && (
+                    <span>{session.audioChunkCount} audio chunks</span>
+                  )}
                 </div>
               </div>
 

@@ -77,7 +77,7 @@ window.flowmind.onAudioStartRecording(async () => {
         window.flowmind.sendAudioChunk(buffer);
       }
     };
-    mediaRecorder.start(10_000); // 10-second chunks
+    mediaRecorder.start(1_000); // 1-second chunks — no audio is lost
     console.log("[FlowMind] Audio recording started");
   } catch (err) {
     console.error("[FlowMind] Failed to start recording:", err);

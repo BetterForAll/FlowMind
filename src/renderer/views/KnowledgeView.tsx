@@ -49,7 +49,7 @@ export function KnowledgeView({ knowledge }: KnowledgeViewProps) {
             <div className="flow-meta">
               <span>
                 Detected{" "}
-                {new Date(k.frontmatter.detected).toLocaleDateString()}
+                {new Date(k.frontmatter.detected).toLocaleString()}
               </span>
             </div>
             <div style={{ marginTop: 8 }}>

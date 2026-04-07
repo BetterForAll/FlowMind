@@ -125,7 +125,7 @@ export function Dashboard({
                   </span>
                   <span>
                     Last seen{" "}
-                    {new Date(flow.frontmatter.last_seen).toLocaleDateString()}
+                    {new Date(flow.frontmatter.last_seen).toLocaleString()}
                   </span>
                 </div>
                 <div style={{ marginTop: 8 }}>
