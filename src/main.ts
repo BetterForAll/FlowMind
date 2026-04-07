@@ -262,21 +262,14 @@ protocol.registerSchemesAsPrivileged([
 app.whenReady().then(async () => {
   // Handle flowmind:// protocol for serving local files
   protocol.handle("flowmind", async (request) => {
-    const filePath = decodeURIComponent(request.url.replace("flowmind://file/", ""));
-    const fsp = await import("node:fs/promises");
-    const data = await fsp.readFile(filePath);
-    const ext = filePath.split(".").pop()?.toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      jpg: "image/jpeg",
-      jpeg: "image/jpeg",
-      png: "image/png",
-      webm: "audio/webm",
-      mp3: "audio/mpeg",
-      wav: "audio/wav",
-    };
-    return new Response(data, {
-      headers: { "Content-Type": mimeTypes[ext ?? ""] ?? "application/octet-stream" },
-    });
+    // Convert flowmind://file/<encoded-path> to a local file path
+    let filePath = request.url.replace("flowmind://file/", "");
+    filePath = decodeURIComponent(filePath);
+    // On Windows, ensure proper drive letter path (C:/...)
+    if (process.platform === "win32" && /^[A-Za-z]:/.test(filePath)) {
+      // Already a valid Windows path
+    }
+    return net.fetch(`file:///${filePath}`);
   });
   flowStore = new FlowStore();
   await flowStore.ensureDirectories();
