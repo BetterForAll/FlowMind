@@ -173,7 +173,7 @@ export function RawDataView() {
                             <span className="audio-label">Recording {i + 1}</span>
                             <audio
                               controls
-                              preload="metadata"
+                              preload="auto"
                               src={audio.dataUrl}
                             />
                           </div>
