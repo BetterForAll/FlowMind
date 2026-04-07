@@ -137,7 +137,8 @@ async function runCleanup(): Promise<void> {
   try {
     const config = await loadConfig();
     const maxAgeMs = cleanupModeToMs(config.cleanupMode);
-    const deleted = await CaptureStorage.cleanupAnalyzed(maxAgeMs);
+    const activeDir = captureOrchestrator.getActiveSessionDir();
+    const deleted = await CaptureStorage.cleanupAnalyzed(maxAgeMs, activeDir);
     if (deleted > 0) {
       console.log(`Cleanup: deleted ${deleted} analyzed sessions (mode: ${config.cleanupMode})`);
     }
@@ -221,7 +222,7 @@ function setupIPC(): void {
   });
 
   ipcMain.handle("sessions:deleteAnalyzed", async () => {
-    return CaptureStorage.cleanupAnalyzed(0);
+    return CaptureStorage.cleanupAnalyzed(0, captureOrchestrator.getActiveSessionDir());
   });
 
   ipcMain.handle("sessions:getTotalSize", async () => {

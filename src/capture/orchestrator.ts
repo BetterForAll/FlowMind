@@ -98,6 +98,10 @@ export class CaptureOrchestrator extends EventEmitter {
     return this.capturing;
   }
 
+  getActiveSessionDir(): string | null {
+    return this.storage.getSessionDir();
+  }
+
   getStats(): CaptureStats {
     const storageStats = this.storage.getStats();
     return {

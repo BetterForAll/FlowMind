@@ -213,13 +213,14 @@ export class CaptureStorage {
     }
   }
 
-  static async cleanupAnalyzed(maxAgeMs: number): Promise<number> {
+  static async cleanupAnalyzed(maxAgeMs: number, activeSessionDir?: string | null): Promise<number> {
     let deleted = 0;
     const sessions = await CaptureStorage.listAllSessions();
     const now = Date.now();
 
     for (const session of sessions) {
       if (!session.analyzed) continue;
+      if (activeSessionDir && session.path === activeSessionDir) continue;
       const analyzedFile = path.join(session.path, ".analyzed");
       if (!fs.existsSync(analyzedFile)) continue;
 
