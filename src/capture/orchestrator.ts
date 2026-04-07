@@ -55,7 +55,7 @@ export class CaptureOrchestrator extends EventEmitter {
     this.input.start();
     await this.windowTracker.start();
     this.screenshot.start();
-    this.audio.startAutoDetection();
+    this.audio.start();
 
     // Emit stats every second
     this.statsInterval = setInterval(() => {
@@ -74,7 +74,6 @@ export class CaptureOrchestrator extends EventEmitter {
     this.input.stop();
     this.windowTracker.stop();
     this.screenshot.stop();
-    this.audio.stopAutoDetection();
     this.audio.stop();
 
     // Log session end
@@ -114,14 +113,10 @@ export class CaptureOrchestrator extends EventEmitter {
 
   toggleAudio(enabled: boolean): void {
     if (enabled) {
-      this.audio.startManual();
+      this.audio.start();
     } else {
-      this.audio.stopManual();
+      this.audio.stop();
     }
-  }
-
-  setAudioAutoMode(enabled: boolean): void {
-    this.audio.setAutoMode(enabled);
   }
 
   async handleAudioChunk(buffer: Buffer): Promise<void> {
@@ -139,10 +134,6 @@ export class CaptureOrchestrator extends EventEmitter {
     const filePath = pathMod.join(audioDir, filename);
     await fsp.writeFile(filePath, buffer);
     console.log(`[Audio] Saved ${(buffer.length / 1024).toFixed(1)} KB to ${filename}`);
-  }
-
-  onMicLevel(level: number): void {
-    this.audio.onMicLevel(level);
   }
 
   private handleEvent(event: CaptureEvent): void {

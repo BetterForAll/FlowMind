@@ -15,7 +15,6 @@ const api = {
   stopCapture: () => ipcRenderer.invoke("capture:stop"),
   getCaptureStats: () => ipcRenderer.invoke("capture:getStats"),
   toggleAudio: (enabled: boolean) => ipcRenderer.invoke("capture:toggleAudio", enabled),
-  setAudioAutoMode: (enabled: boolean) => ipcRenderer.invoke("capture:setAudioAutoMode", enabled),
 
   // Raw data management
   listSessions: () => ipcRenderer.invoke("sessions:list"),
@@ -65,16 +64,6 @@ const api = {
   },
 
   // Audio capture (renderer-side)
-  onAudioStartMonitoring: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on("audio:startMonitoring", listener);
-    return () => ipcRenderer.removeListener("audio:startMonitoring", listener);
-  },
-  onAudioStopMonitoring: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on("audio:stopMonitoring", listener);
-    return () => ipcRenderer.removeListener("audio:stopMonitoring", listener);
-  },
   onAudioStartRecording: (callback: () => void) => {
     const listener = () => callback();
     ipcRenderer.on("audio:startRecording", listener);
@@ -84,9 +73,6 @@ const api = {
     const listener = () => callback();
     ipcRenderer.on("audio:stopRecording", listener);
     return () => ipcRenderer.removeListener("audio:stopRecording", listener);
-  },
-  sendMicLevel: (level: number) => {
-    ipcRenderer.send("audio:micLevel", level);
   },
   sendAudioChunk: (buffer: ArrayBuffer) => {
     ipcRenderer.send("audio:chunk", Buffer.from(buffer));

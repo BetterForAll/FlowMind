@@ -190,17 +190,9 @@ function setupIPC(): void {
     captureOrchestrator.toggleAudio(enabled);
   });
 
-  ipcMain.handle("capture:setAudioAutoMode", (_e, enabled: boolean) => {
-    captureOrchestrator.setAudioAutoMode(enabled);
-  });
-
   // Audio from renderer
   ipcMain.on("audio:chunk", async (_e, buffer: Buffer) => {
     await captureOrchestrator.handleAudioChunk(buffer);
-  });
-
-  ipcMain.on("audio:micLevel", (_e, level: number) => {
-    captureOrchestrator.onMicLevel(level);
   });
 
   // Raw data management
