@@ -261,9 +261,22 @@ protocol.registerSchemesAsPrivileged([
 
 app.whenReady().then(async () => {
   // Handle flowmind:// protocol for serving local files
-  protocol.handle("flowmind", (request) => {
+  protocol.handle("flowmind", async (request) => {
     const filePath = decodeURIComponent(request.url.replace("flowmind://file/", ""));
-    return net.fetch(`file://${filePath}`);
+    const fsp = await import("node:fs/promises");
+    const data = await fsp.readFile(filePath);
+    const ext = filePath.split(".").pop()?.toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      webm: "audio/webm",
+      mp3: "audio/mpeg",
+      wav: "audio/wav",
+    };
+    return new Response(data, {
+      headers: { "Content-Type": mimeTypes[ext ?? ""] ?? "application/octet-stream" },
+    });
   });
   flowStore = new FlowStore();
   await flowStore.ensureDirectories();

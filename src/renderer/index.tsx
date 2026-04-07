@@ -65,19 +65,31 @@ window.flowmind.onAudioStopMonitoring(() => {
 });
 
 // Actual recording — started/stopped by main process based on mic levels
+let recordedChunks: Blob[] = [];
+
 window.flowmind.onAudioStartRecording(async () => {
   try {
+    recordedChunks = [];
     recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(recordStream, {
       mimeType: "audio/webm;codecs=opus",
     });
-    mediaRecorder.ondataavailable = async (e) => {
+    mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
-        const buffer = await e.data.arrayBuffer();
-        window.flowmind.sendAudioChunk(buffer);
+        recordedChunks.push(e.data);
       }
     };
-    mediaRecorder.start(1_000); // 1-second chunks — no audio is lost
+    mediaRecorder.onstop = async () => {
+      // Combine all chunks into one valid WebM file and send to main
+      if (recordedChunks.length > 0) {
+        const blob = new Blob(recordedChunks, { type: "audio/webm;codecs=opus" });
+        const buffer = await blob.arrayBuffer();
+        window.flowmind.sendAudioChunk(buffer);
+        console.log(`[FlowMind] Audio saved: ${(buffer.byteLength / 1024).toFixed(1)} KB`);
+      }
+      recordedChunks = [];
+    };
+    mediaRecorder.start(5_000); // 5-second internal chunks (combined on stop)
     console.log("[FlowMind] Audio recording started");
   } catch (err) {
     console.error("[FlowMind] Failed to start recording:", err);
@@ -86,9 +98,7 @@ window.flowmind.onAudioStartRecording(async () => {
 
 window.flowmind.onAudioStopRecording(() => {
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    // requestData() forces a final chunk before stopping
-    mediaRecorder.requestData();
-    mediaRecorder.stop();
+    mediaRecorder.stop(); // triggers onstop which saves the combined file
   }
   if (recordStream) {
     recordStream.getTracks().forEach((t) => t.stop());
