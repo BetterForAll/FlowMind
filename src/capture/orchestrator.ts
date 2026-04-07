@@ -17,6 +17,7 @@ export class CaptureOrchestrator extends EventEmitter {
   private storage: CaptureStorage;
   private capturing = false;
   private statsInterval: ReturnType<typeof setInterval> | null = null;
+  private lastSessionDir: string | null = null;
 
   constructor() {
     super();
@@ -83,6 +84,12 @@ export class CaptureOrchestrator extends EventEmitter {
       data: { ...this.storage.getStats() },
     });
 
+    // Save session dir before closing — audio chunks may arrive after stop
+    this.lastSessionDir = this.storage.getSessionDir();
+
+    // Wait a bit for audio to arrive from renderer before closing session
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
     await this.storage.stopSession();
     this.session.stop();
     this.capturing = false;
@@ -118,7 +125,19 @@ export class CaptureOrchestrator extends EventEmitter {
   }
 
   async handleAudioChunk(buffer: Buffer): Promise<void> {
-    await this.audio.handleChunk(buffer);
+    // Try normal save first, fall back to lastSessionDir if session already closed
+    const sessionDir = this.storage.getSessionDir() ?? this.lastSessionDir;
+    if (!sessionDir) return;
+
+    const fsp = await import("node:fs/promises");
+    const path = await import("node:path");
+    const audioDir = path.join(sessionDir, "audio");
+    const files = await fsp.readdir(audioDir).catch(() => [] as string[]);
+    const chunkIndex = files.filter((f: string) => f.endsWith(".webm")).length;
+    const filename = `chunk-${String(chunkIndex).padStart(3, "0")}.webm`;
+    const filePath = path.join(audioDir, filename);
+    await fsp.writeFile(filePath, buffer);
+    console.log(`[Audio] Saved ${(buffer.length / 1024).toFixed(1)} KB to ${filename}`);
   }
 
   onMicLevel(level: number): void {
