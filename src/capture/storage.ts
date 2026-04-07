@@ -150,9 +150,10 @@ export class CaptureStorage {
         : 0;
 
       const audioDir = path.join(sessionPath, "audio");
-      const audioChunkCount = fs.existsSync(audioDir)
-        ? (await fsp.readdir(audioDir)).filter((f) => f.endsWith(".webm")).length
-        : 0;
+      const audioFiles = fs.existsSync(audioDir)
+        ? (await fsp.readdir(audioDir)).filter((f) => f.endsWith(".webm"))
+        : [];
+      const audioChunkCount = audioFiles.length;
 
       const sizeBytes = await CaptureStorage.getDirSize(sessionPath);
 

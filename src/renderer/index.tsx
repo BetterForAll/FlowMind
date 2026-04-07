@@ -77,6 +77,7 @@ window.flowmind.onAudioStartRecording(async () => {
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
         recordedChunks.push(e.data);
+        // Don't send individual chunks — wait for onstop to combine them
       }
     };
     mediaRecorder.onstop = async () => {

@@ -130,12 +130,13 @@ export class CaptureOrchestrator extends EventEmitter {
     if (!sessionDir) return;
 
     const fsp = await import("node:fs/promises");
-    const path = await import("node:path");
-    const audioDir = path.join(sessionDir, "audio");
-    const files = await fsp.readdir(audioDir).catch(() => [] as string[]);
-    const chunkIndex = files.filter((f: string) => f.endsWith(".webm")).length;
-    const filename = `chunk-${String(chunkIndex).padStart(3, "0")}.webm`;
-    const filePath = path.join(audioDir, filename);
+    const pathMod = await import("node:path");
+    const audioDir = pathMod.join(sessionDir, "audio");
+    await fsp.mkdir(audioDir, { recursive: true });
+
+    // Save as timestamped file — each recording session produces one file
+    const filename = `recording-${Date.now()}.webm`;
+    const filePath = pathMod.join(audioDir, filename);
     await fsp.writeFile(filePath, buffer);
     console.log(`[Audio] Saved ${(buffer.length / 1024).toFixed(1)} KB to ${filename}`);
   }
