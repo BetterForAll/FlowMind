@@ -34,6 +34,7 @@ const api = {
 
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:get"),
+  updateSettings: (updates: Record<string, unknown>) => ipcRenderer.invoke("settings:update", updates),
 
   // Events from main process
   onDetectionStatus: (callback: (status: string) => void) => {

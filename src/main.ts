@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from "electron";
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, protocol, net } from "electron";
 import path from "node:path";
 import dotenv from "dotenv";
 
@@ -9,6 +9,7 @@ import { FlowStore } from "./engine/flow-store";
 import { InterviewEngine } from "./engine/interview";
 import { CaptureOrchestrator } from "./capture/orchestrator";
 import { CaptureStorage } from "./capture/storage";
+import { loadConfig, saveConfig, cleanupModeToMs, type AppConfig } from "./config";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -21,7 +22,6 @@ let interviewEngine: InterviewEngine;
 let captureOrchestrator: CaptureOrchestrator;
 let detectionInterval: ReturnType<typeof setInterval> | null = null;
 let cleanupInterval: ReturnType<typeof setInterval> | null = null;
-const CLEANUP_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours default
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -121,11 +121,27 @@ async function runDetection(): Promise<void> {
     const results = await flowEngine.detectFlows();
     mainWindow?.webContents.send("detection:status", "idle");
     mainWindow?.webContents.send("detection:results", results);
+
+    // Run cleanup after successful detection
+    await runCleanup();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Detection failed:", message);
     mainWindow?.webContents.send("detection:status", "error");
     mainWindow?.webContents.send("detection:error", message);
+  }
+}
+
+async function runCleanup(): Promise<void> {
+  try {
+    const config = await loadConfig();
+    const maxAgeMs = cleanupModeToMs(config.cleanupMode);
+    const deleted = await CaptureStorage.cleanupAnalyzed(maxAgeMs);
+    if (deleted > 0) {
+      console.log(`Cleanup: deleted ${deleted} analyzed sessions (mode: ${config.cleanupMode})`);
+    }
+  } catch (err) {
+    console.error("Cleanup failed:", err);
   }
 }
 
@@ -218,14 +234,26 @@ function setupIPC(): void {
   });
 
   // Settings
-  ipcMain.handle("settings:get", () => {
-    return {
-      detectionIntervalMinutes: 60,
-    };
+  ipcMain.handle("settings:get", async () => {
+    return loadConfig();
+  });
+
+  ipcMain.handle("settings:update", async (_e, updates: Partial<AppConfig>) => {
+    return saveConfig(updates);
   });
 }
 
+// Register custom protocol to serve local files (screenshots)
+protocol.registerSchemesAsPrivileged([
+  { scheme: "flowmind", privileges: { bypassCSP: true, supportFetchAPI: true } },
+]);
+
 app.whenReady().then(async () => {
+  // Handle flowmind:// protocol for serving local files
+  protocol.handle("flowmind", (request) => {
+    const filePath = decodeURIComponent(request.url.replace("flowmind://file/", ""));
+    return net.fetch(`file://${filePath}`);
+  });
   flowStore = new FlowStore();
   await flowStore.ensureDirectories();
 
@@ -246,12 +274,7 @@ app.whenReady().then(async () => {
   detectionInterval = setInterval(runDetection, 60 * 60 * 1000);
 
   // Auto-cleanup analyzed sessions every hour
-  cleanupInterval = setInterval(async () => {
-    const deleted = await CaptureStorage.cleanupAnalyzed(CLEANUP_MAX_AGE_MS);
-    if (deleted > 0) {
-      console.log(`Auto-cleanup: deleted ${deleted} analyzed sessions older than 12h`);
-    }
-  }, 60 * 60 * 1000);
+  cleanupInterval = setInterval(() => runCleanup(), 60 * 60 * 1000);
 });
 
 app.on("window-all-closed", () => {

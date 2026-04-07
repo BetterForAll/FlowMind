@@ -240,7 +240,13 @@ export class FlowDetectionEngine {
       },
     });
 
-    const text = response.text ?? "";
+    let text = response.text ?? "";
+    // Strip markdown fences if Gemini wraps the JSON
+    text = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
+    // Remove control characters that break JSON.parse
+    text = text.replace(/[\x00-\x1f\x7f]/g, (ch) =>
+      ch === "\n" || ch === "\r" || ch === "\t" ? ch : ""
+    );
     return JSON.parse(text) as GeminiAnalysis;
   }
 

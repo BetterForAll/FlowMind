@@ -148,7 +148,7 @@ export function RawDataView() {
                       {screenshots.map((ssPath) => (
                         <div key={ssPath} className="screenshot-thumb">
                           <img
-                            src={`file://${ssPath.replace(/\\/g, "/")}`}
+                            src={`flowmind://file/${encodeURIComponent(ssPath.replace(/\\/g, "/"))}`}
                             alt="screenshot"
                             loading="lazy"
                           />
