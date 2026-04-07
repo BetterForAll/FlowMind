@@ -54,6 +54,7 @@ export class CaptureOrchestrator extends EventEmitter {
     this.input.start();
     await this.windowTracker.start();
     this.screenshot.start();
+    this.audio.startAutoDetection();
 
     // Emit stats every second
     this.statsInterval = setInterval(() => {
@@ -72,6 +73,7 @@ export class CaptureOrchestrator extends EventEmitter {
     this.input.stop();
     this.windowTracker.stop();
     this.screenshot.stop();
+    this.audio.stopAutoDetection();
     this.audio.stop();
 
     // Log session end
@@ -135,13 +137,6 @@ export class CaptureOrchestrator extends EventEmitter {
       }
     }
 
-    // Notify audio module about window changes for auto-detection
-    if (event.type === "window-change") {
-      this.audio.onWindowChange(
-        event.data.app as string,
-        event.data.title as string
-      );
-    }
   }
 
   private async handleSegment(): Promise<void> {

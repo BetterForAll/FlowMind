@@ -64,9 +64,9 @@ export function SettingsView() {
       <div className="settings-section">
         <h2 className="settings-heading">Audio Recording</h2>
         <p className="settings-desc">
-          When enabled, audio recording starts automatically when a meeting app
-          is detected (Zoom, Teams, Discord, Google Meet, etc.) and stops 30 seconds
-          after you leave the meeting.
+          When enabled, audio recording starts automatically whenever any app is
+          using your microphone (calls, meetings, voice notes, dictation). Recording
+          stops 15 seconds after the microphone goes inactive.
         </p>
         <label className="settings-toggle">
           <input
@@ -74,7 +74,7 @@ export function SettingsView() {
             checked={settings.audioAutoDetect}
             onChange={(e) => update("audioAutoDetect", e.target.checked)}
           />
-          <span>Auto-detect meetings and record audio</span>
+          <span>Auto-record when microphone is in use</span>
         </label>
       </div>
 

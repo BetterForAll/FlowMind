@@ -1,40 +1,20 @@
 import { EventEmitter } from "node:events";
 import type { BrowserWindow } from "electron";
 import type { CaptureStorage } from "./storage";
+import { isMicrophoneInUse } from "./mic-detector";
 
-// Apps and window title patterns that indicate a meeting/call
-const MEETING_APPS = new Set([
-  "zoom", "zoom.exe",
-  "teams", "teams.exe", "ms-teams",
-  "discord", "discord.exe",
-  "slack", "slack.exe",
-  "webex", "ciscowebex",
-  "skype", "skype.exe",
-  "telegram", "telegram.exe",
-  "whatsapp", "whatsapp.exe",
-]);
-
-const MEETING_TITLE_PATTERNS = [
-  /zoom meeting/i,
-  /\bmeet\b.*google/i,
-  /google\s*meet/i,
-  /meet\.google\.com/i,
-  /teams\s*(meeting|call)/i,
-  /huddle/i,
-  /\bcall\b/i,
-  /webex/i,
-  /facetime/i,
-];
+const MIC_POLL_INTERVAL_MS = 3000; // Check mic status every 3 seconds
+const GRACE_PERIOD_MS = 15_000;    // Keep recording 15s after mic goes inactive
 
 export class AudioCapture extends EventEmitter {
   private running = false;
   private storage: CaptureStorage;
   private window: BrowserWindow | null = null;
   private chunkIndex = 0;
-  private autoMode = true; // Auto-detect meetings
-  private manualOverride = false; // Manual toggle overrides auto
-  private awayTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly awayTimeoutMs = 30_000; // 30 seconds away from meeting app → stop
+  private autoMode = true;
+  private manualOverride = false;
+  private pollInterval: ReturnType<typeof setInterval> | null = null;
+  private graceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(storage: CaptureStorage) {
     super();
@@ -45,43 +25,51 @@ export class AudioCapture extends EventEmitter {
     this.window = window;
   }
 
-  /** Called by orchestrator when active window changes */
-  onWindowChange(app: string, title: string): void {
-    if (!this.autoMode || this.manualOverride) return;
+  /** Start polling for microphone activity */
+  startAutoDetection(): void {
+    if (this.pollInterval || !this.autoMode) return;
 
-    const isMeetingApp = this.isMeetingWindow(app, title);
+    this.pollInterval = setInterval(async () => {
+      if (this.manualOverride) return;
 
-    if (isMeetingApp) {
-      // Clear any pending stop timer
-      if (this.awayTimer) {
-        clearTimeout(this.awayTimer);
-        this.awayTimer = null;
-      }
-      // Start recording if not already
-      if (!this.running) {
+      const micActive = await isMicrophoneInUse();
+
+      if (micActive && !this.running) {
+        // Mic just became active — start recording
+        if (this.graceTimer) {
+          clearTimeout(this.graceTimer);
+          this.graceTimer = null;
+        }
         this.start();
-        this.emit("auto-started", { app, title });
+        this.emit("auto-started", { reason: "microphone active" });
+      } else if (!micActive && this.running && !this.manualOverride) {
+        // Mic went inactive — start grace period before stopping
+        if (!this.graceTimer) {
+          this.graceTimer = setTimeout(() => {
+            this.graceTimer = null;
+            if (this.running && !this.manualOverride) {
+              this.stop();
+              this.emit("auto-stopped", { reason: "microphone inactive" });
+            }
+          }, GRACE_PERIOD_MS);
+        }
+      } else if (micActive && this.running && this.graceTimer) {
+        // Mic came back during grace period — cancel stop
+        clearTimeout(this.graceTimer);
+        this.graceTimer = null;
       }
-    } else if (this.running && !this.manualOverride) {
-      // User switched away from meeting app — start countdown
-      if (!this.awayTimer) {
-        this.awayTimer = setTimeout(() => {
-          this.awayTimer = null;
-          if (this.running && !this.manualOverride) {
-            this.stop();
-            this.emit("auto-stopped", { reason: "left meeting app" });
-          }
-        }, this.awayTimeoutMs);
-      }
-    }
+    }, MIC_POLL_INTERVAL_MS);
   }
 
-  private isMeetingWindow(app: string, title: string): boolean {
-    const appLower = app.toLowerCase();
-    if (MEETING_APPS.has(appLower)) return true;
-    // Check browser windows for web-based meeting tools
-    const combined = `${app} ${title}`;
-    return MEETING_TITLE_PATTERNS.some((p) => p.test(combined));
+  stopAutoDetection(): void {
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+    if (this.graceTimer) {
+      clearTimeout(this.graceTimer);
+      this.graceTimer = null;
+    }
   }
 
   /** Manual start (user clicks toggle) */
@@ -106,9 +94,9 @@ export class AudioCapture extends EventEmitter {
   stop(): void {
     if (!this.running) return;
     this.running = false;
-    if (this.awayTimer) {
-      clearTimeout(this.awayTimer);
-      this.awayTimer = null;
+    if (this.graceTimer) {
+      clearTimeout(this.graceTimer);
+      this.graceTimer = null;
     }
     this.window?.webContents.send("audio:stop");
   }
@@ -123,6 +111,11 @@ export class AudioCapture extends EventEmitter {
 
   setAutoMode(enabled: boolean): void {
     this.autoMode = enabled;
+    if (enabled) {
+      this.startAutoDetection();
+    } else {
+      this.stopAutoDetection();
+    }
   }
 
   async handleChunk(buffer: Buffer): Promise<void> {
