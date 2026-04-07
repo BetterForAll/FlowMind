@@ -41,6 +41,10 @@ export function RawDataView() {
 
   useEffect(() => {
     loadData();
+
+    // Refresh when detection completes (new sessions may appear or get analyzed)
+    const unsub = window.flowmind.onDetectionResults(() => loadData());
+    return () => unsub();
   }, [loadData]);
 
   const toggleSession = async (session: SessionInfo) => {
