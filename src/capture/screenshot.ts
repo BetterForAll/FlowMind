@@ -45,6 +45,7 @@ export class ScreenshotCapture extends EventEmitter {
       const thumbnail = sources[0].thumbnail;
       const jpegBuffer = thumbnail.toJPEG(70);
 
+      if (!this.storage.getSessionDir()) return; // Session may have ended
       const filePath = await this.storage.saveScreenshot(
         Buffer.from(jpegBuffer),
         now

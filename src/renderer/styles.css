@@ -351,6 +351,54 @@ body {
   color: var(--text);
 }
 
+/* Session / Raw Data */
+.session-card {
+  margin-bottom: 4px;
+}
+
+.session-expanded {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 16px;
+}
+
+.session-actions {
+  margin-bottom: 12px;
+}
+
+.screenshot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+.screenshot-thumb {
+  position: relative;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.screenshot-thumb img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.screenshot-time {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 6px;
+  text-align: center;
+}
+
 /* Section headers */
 .section-title {
   font-size: 14px;

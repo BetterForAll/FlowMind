@@ -130,7 +130,7 @@ export class InterviewEngine {
     }
 
     const response = await this.genai.models.generateContent({
-      model: "gemini-2.5-flash-lite-preview-06-17",
+      model: "gemini-2.5-flash-lite",
       contents: [
         {
           role: "user",
@@ -186,7 +186,7 @@ export class InterviewEngine {
   ): Promise<boolean> {
     // Use Gemini to synthesize the partial flow + answers into a complete flow
     const response = await this.genai.models.generateContent({
-      model: "gemini-2.5-flash-lite-preview-06-17",
+      model: "gemini-2.5-flash-lite",
       contents: [
         {
           role: "user",

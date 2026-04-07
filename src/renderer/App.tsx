@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback } from "react";
 import { Dashboard } from "./views/Dashboard";
 import { FlowDetail } from "./views/FlowDetail";
 import { KnowledgeView } from "./views/KnowledgeView";
+import { RawDataView } from "./views/RawDataView";
 import type { FlowDocument, KnowledgeDocument, CaptureStats } from "../types";
 
-type View = "dashboard" | "flow-detail" | "knowledge";
+type View = "dashboard" | "flow-detail" | "knowledge" | "raw-data";
 
 export function App() {
   const [view, setView] = useState<View>("dashboard");
@@ -82,6 +83,12 @@ export function App() {
           >
             Knowledge
           </button>
+          <button
+            className={`nav-item ${view === "raw-data" ? "active" : ""}`}
+            onClick={() => setView("raw-data")}
+          >
+            Raw Data
+          </button>
         </nav>
         <div className="sidebar-status">
           <span className={`status-dot ${captureStats?.capturing ? "capturing" : detectionStatus}`} />
@@ -118,6 +125,9 @@ export function App() {
         )}
         {view === "knowledge" && (
           <KnowledgeView knowledge={knowledge} />
+        )}
+        {view === "raw-data" && (
+          <RawDataView />
         )}
       </main>
     </div>

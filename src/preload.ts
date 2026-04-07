@@ -15,6 +15,14 @@ const api = {
   stopCapture: () => ipcRenderer.invoke("capture:stop"),
   getCaptureStats: () => ipcRenderer.invoke("capture:getStats"),
   toggleAudio: (enabled: boolean) => ipcRenderer.invoke("capture:toggleAudio", enabled),
+  setAudioAutoMode: (enabled: boolean) => ipcRenderer.invoke("capture:setAudioAutoMode", enabled),
+
+  // Raw data management
+  listSessions: () => ipcRenderer.invoke("sessions:list"),
+  getSessionScreenshots: (sessionPath: string) => ipcRenderer.invoke("sessions:getScreenshots", sessionPath),
+  deleteSession: (sessionPath: string) => ipcRenderer.invoke("sessions:delete", sessionPath),
+  deleteAnalyzedSessions: () => ipcRenderer.invoke("sessions:deleteAnalyzed"),
+  getTotalStorageSize: () => ipcRenderer.invoke("sessions:getTotalSize"),
 
   // Interview
   getQuestions: (flowId: string) =>

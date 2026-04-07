@@ -1,10 +1,14 @@
-import "dotenv/config";
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from "electron";
 import path from "node:path";
+import dotenv from "dotenv";
+
+// Load .env from project root (not cwd, which changes in Electron Forge)
+dotenv.config({ path: path.join(app.getAppPath(), ".env") });
 import { FlowDetectionEngine } from "./engine/flow-detection";
 import { FlowStore } from "./engine/flow-store";
 import { InterviewEngine } from "./engine/interview";
 import { CaptureOrchestrator } from "./capture/orchestrator";
+import { CaptureStorage } from "./capture/storage";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -16,6 +20,8 @@ let flowStore: FlowStore;
 let interviewEngine: InterviewEngine;
 let captureOrchestrator: CaptureOrchestrator;
 let detectionInterval: ReturnType<typeof setInterval> | null = null;
+let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+const CLEANUP_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours default
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -117,6 +123,7 @@ async function runDetection(): Promise<void> {
     mainWindow?.webContents.send("detection:results", results);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error("Detection failed:", message);
     mainWindow?.webContents.send("detection:status", "error");
     mainWindow?.webContents.send("detection:error", message);
   }
@@ -164,9 +171,34 @@ function setupIPC(): void {
     captureOrchestrator.toggleAudio(enabled);
   });
 
+  ipcMain.handle("capture:setAudioAutoMode", (_e, enabled: boolean) => {
+    captureOrchestrator.setAudioAutoMode(enabled);
+  });
+
   // Audio chunks from renderer
   ipcMain.on("audio:chunk", async (_e, buffer: Buffer) => {
     await captureOrchestrator.handleAudioChunk(buffer);
+  });
+
+  // Raw data management
+  ipcMain.handle("sessions:list", async () => {
+    return CaptureStorage.listAllSessions();
+  });
+
+  ipcMain.handle("sessions:getScreenshots", async (_e, sessionPath: string) => {
+    return CaptureStorage.getSessionScreenshots(sessionPath);
+  });
+
+  ipcMain.handle("sessions:delete", async (_e, sessionPath: string) => {
+    await CaptureStorage.deleteSession(sessionPath);
+  });
+
+  ipcMain.handle("sessions:deleteAnalyzed", async () => {
+    return CaptureStorage.cleanupAnalyzed(0);
+  });
+
+  ipcMain.handle("sessions:getTotalSize", async () => {
+    return CaptureStorage.getTotalSize();
   });
 
   // Interview
@@ -212,6 +244,14 @@ app.whenReady().then(async () => {
 
   // Run detection every 60 minutes
   detectionInterval = setInterval(runDetection, 60 * 60 * 1000);
+
+  // Auto-cleanup analyzed sessions every hour
+  cleanupInterval = setInterval(async () => {
+    const deleted = await CaptureStorage.cleanupAnalyzed(CLEANUP_MAX_AGE_MS);
+    if (deleted > 0) {
+      console.log(`Auto-cleanup: deleted ${deleted} analyzed sessions older than 12h`);
+    }
+  }, 60 * 60 * 1000);
 });
 
 app.on("window-all-closed", () => {
@@ -226,6 +266,7 @@ app.on("activate", () => {
 
 app.on("before-quit", async () => {
   if (detectionInterval) clearInterval(detectionInterval);
+  if (cleanupInterval) clearInterval(cleanupInterval);
   await captureOrchestrator.stop();
   tray = null;
 });

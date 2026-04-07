@@ -104,11 +104,15 @@ export class CaptureOrchestrator extends EventEmitter {
   }
 
   toggleAudio(enabled: boolean): void {
-    if (enabled && this.capturing) {
-      this.audio.start();
+    if (enabled) {
+      this.audio.startManual();
     } else {
-      this.audio.stop();
+      this.audio.stopManual();
     }
+  }
+
+  setAudioAutoMode(enabled: boolean): void {
+    this.audio.setAutoMode(enabled);
   }
 
   async handleAudioChunk(buffer: Buffer): Promise<void> {
@@ -129,6 +133,14 @@ export class CaptureOrchestrator extends EventEmitter {
       if (keycode === 28 || keycode === 36) {
         this.screenshot.capture();
       }
+    }
+
+    // Notify audio module about window changes for auto-detection
+    if (event.type === "window-change") {
+      this.audio.onWindowChange(
+        event.data.app as string,
+        event.data.title as string
+      );
     }
   }
 

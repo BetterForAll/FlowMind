@@ -2,6 +2,7 @@
   "name": "flowmind",
   "version": "0.1.0",
   "description": "Automated knowledge extractor — observes user behavior, detects repeated workflows, and converts them into automations and agent skills",
+  "author": "BetterForAll",
   "main": ".vite/build/main.js",
   "private": true,
   "scripts": {

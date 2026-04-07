@@ -91,4 +91,156 @@ export class CaptureStorage {
     }
     return dirs;
   }
+
+  static async listAllSessions(): Promise<SessionInfo[]> {
+    const sessions: SessionInfo[] = [];
+    if (!fs.existsSync(BASE_DIR)) return sessions;
+
+    const dateDirs = await fsp.readdir(BASE_DIR);
+    for (const dateDir of dateDirs.sort().reverse()) {
+      const datePath = path.join(BASE_DIR, dateDir);
+      const stat = await fsp.stat(datePath);
+      if (!stat.isDirectory()) continue;
+
+      const sessionDirs = await fsp.readdir(datePath);
+      for (const sessionDir of sessionDirs.sort().reverse()) {
+        const sessionPath = path.join(datePath, sessionDir);
+        const sessionStat = await fsp.stat(sessionPath);
+        if (!sessionStat.isDirectory()) continue;
+
+        const info = await CaptureStorage.getSessionInfo(sessionPath, dateDir, sessionDir);
+        if (info) sessions.push(info);
+      }
+    }
+    return sessions;
+  }
+
+  private static async getSessionInfo(
+    sessionPath: string,
+    dateDir: string,
+    sessionDir: string
+  ): Promise<SessionInfo | null> {
+    try {
+      const eventsFile = path.join(sessionPath, "events.jsonl");
+      let eventCount = 0;
+      let startedAt: string | null = null;
+      let endedAt: string | null = null;
+
+      if (fs.existsSync(eventsFile)) {
+        const content = await fsp.readFile(eventsFile, "utf-8");
+        const lines = content.split("\n").filter((l) => l.trim());
+        eventCount = lines.length;
+        if (lines.length > 0) {
+          try {
+            const first = JSON.parse(lines[0]);
+            startedAt = first.ts;
+            const last = JSON.parse(lines[lines.length - 1]);
+            endedAt = last.ts;
+          } catch { /* skip */ }
+        }
+      }
+
+      const ssDir = path.join(sessionPath, "screenshots");
+      const screenshotCount = fs.existsSync(ssDir)
+        ? (await fsp.readdir(ssDir)).filter((f) => f.endsWith(".jpg")).length
+        : 0;
+
+      const sizeBytes = await CaptureStorage.getDirSize(sessionPath);
+
+      // Check if analyzed marker exists
+      const analyzed = fs.existsSync(path.join(sessionPath, ".analyzed"));
+
+      return {
+        id: sessionDir,
+        date: dateDir,
+        path: sessionPath,
+        startedAt: startedAt ?? new Date(0).toISOString(),
+        endedAt,
+        eventCount,
+        screenshotCount,
+        sizeBytes,
+        analyzed,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  static async getSessionScreenshots(sessionPath: string): Promise<string[]> {
+    const ssDir = path.join(sessionPath, "screenshots");
+    if (!fs.existsSync(ssDir)) return [];
+    const files = await fsp.readdir(ssDir);
+    return files
+      .filter((f) => f.endsWith(".jpg"))
+      .sort()
+      .map((f) => path.join(ssDir, f));
+  }
+
+  static async deleteSession(sessionPath: string): Promise<void> {
+    await fsp.rm(sessionPath, { recursive: true, force: true });
+    // Clean up empty date directory
+    const parentDir = path.dirname(sessionPath);
+    const remaining = await fsp.readdir(parentDir);
+    if (remaining.length === 0) {
+      await fsp.rm(parentDir, { recursive: true, force: true });
+    }
+  }
+
+  static async markAnalyzed(sessionPaths: string[]): Promise<void> {
+    for (const sp of sessionPaths) {
+      await fsp.writeFile(path.join(sp, ".analyzed"), new Date().toISOString(), "utf-8");
+    }
+  }
+
+  static async cleanupAnalyzed(maxAgeMs: number): Promise<number> {
+    let deleted = 0;
+    const sessions = await CaptureStorage.listAllSessions();
+    const now = Date.now();
+
+    for (const session of sessions) {
+      if (!session.analyzed) continue;
+      const analyzedFile = path.join(session.path, ".analyzed");
+      if (!fs.existsSync(analyzedFile)) continue;
+
+      const analyzedAt = await fsp.readFile(analyzedFile, "utf-8");
+      const analyzedTime = new Date(analyzedAt.trim()).getTime();
+      if (now - analyzedTime > maxAgeMs) {
+        await CaptureStorage.deleteSession(session.path);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  private static async getDirSize(dirPath: string): Promise<number> {
+    let size = 0;
+    const entries = await fsp.readdir(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        size += await CaptureStorage.getDirSize(fullPath);
+      } else {
+        const stat = await fsp.stat(fullPath);
+        size += stat.size;
+      }
+    }
+    return size;
+  }
+
+  static async getTotalSize(): Promise<number> {
+    if (!fs.existsSync(BASE_DIR)) return 0;
+    return CaptureStorage.getDirSize(BASE_DIR);
+  }
+}
+
+export interface SessionInfo {
+  id: string;
+  date: string;
+  path: string;
+  startedAt: string;
+  endedAt: string | null;
+  eventCount: number;
+  screenshotCount: number;
+  sizeBytes: number;
+  analyzed: boolean;
 }

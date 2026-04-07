@@ -122,7 +122,12 @@ export class FlowDetectionEngine {
       const analysis = await this.analyzeWithGemini(timeline, screenshots);
 
       // 5. Save results
-      return await this.saveResults(analysis);
+      const result = await this.saveResults(analysis);
+
+      // 6. Mark sessions as analyzed
+      await CaptureStorage.markAnalyzed(sessionDirs);
+
+      return result;
     } finally {
       this.running = false;
     }
@@ -228,7 +233,7 @@ export class FlowDetectionEngine {
     }
 
     const response = await this.genai.models.generateContent({
-      model: "gemini-2.5-flash-lite-preview-06-17",
+      model: "gemini-2.5-flash-lite",
       contents: [{ role: "user", parts }],
       config: {
         responseMimeType: "application/json",
