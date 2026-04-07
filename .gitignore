@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+.playwright-mcp/
+node_modules/
+.env
+.vite/
+out/
+dist/
