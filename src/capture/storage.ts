@@ -112,6 +112,10 @@ export class CaptureStorage {
         if (info) sessions.push(info);
       }
     }
+    // Sort by start time, newest first
+    sessions.sort((a, b) =>
+      new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime()
+    );
     return sessions;
   }
 
