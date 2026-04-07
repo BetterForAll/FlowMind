@@ -9,6 +9,16 @@ let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let mediaRecorder: MediaRecorder | null = null;
 let recordStream: MediaStream | null = null;
 
+// Request mic permission early so it's ready when needed
+navigator.mediaDevices.getUserMedia({ audio: true })
+  .then((stream) => {
+    stream.getTracks().forEach((t) => t.stop()); // Release immediately
+    console.log("[FlowMind] Mic permission granted");
+  })
+  .catch((err) => {
+    console.error("[FlowMind] Mic permission denied:", err);
+  });
+
 // Mic level monitoring — detects speech, reports levels to main process
 window.flowmind.onAudioStartMonitoring(async () => {
   try {
@@ -33,11 +43,13 @@ window.flowmind.onAudioStartMonitoring(async () => {
       window.flowmind.sendMicLevel(level);
     }, 500); // Check every 500ms
 
-    console.log("[FlowMind] Mic monitoring started");
+    console.log("[FlowMind] Mic monitoring started — polling levels every 500ms");
   } catch (err) {
     console.error("[FlowMind] Failed to start mic monitoring:", err);
   }
 });
+
+console.log("[FlowMind] Audio listeners registered");
 
 window.flowmind.onAudioStopMonitoring(() => {
   if (monitorInterval) {

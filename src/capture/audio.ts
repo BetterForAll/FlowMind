@@ -25,8 +25,12 @@ export class AudioCapture extends EventEmitter {
 
   /** Start mic level monitoring in the renderer */
   startAutoDetection(): void {
-    if (this.monitoringStarted || !this.autoMode || !this.window) return;
+    if (this.monitoringStarted || !this.autoMode || !this.window) {
+      console.log(`[Audio] startAutoDetection skipped: monitoring=${this.monitoringStarted}, auto=${this.autoMode}, window=${!!this.window}`);
+      return;
+    }
     this.monitoringStarted = true;
+    console.log("[Audio] Sending startMonitoring to renderer");
     this.window.webContents.send("audio:startMonitoring");
   }
 
@@ -45,6 +49,9 @@ export class AudioCapture extends EventEmitter {
     if (!this.autoMode || this.manualOverride) return;
 
     const isActive = level > 0.02;
+    if (isActive) {
+      console.log(`[Audio] Mic level: ${level.toFixed(3)} — ACTIVE`);
+    }
 
     if (isActive && !this.running) {
       // Speech detected — start recording
