@@ -212,6 +212,10 @@ function setupIPC(): void {
     return CaptureStorage.getSessionScreenshots(sessionPath);
   });
 
+  ipcMain.handle("sessions:getAudioFiles", async (_e, sessionPath: string) => {
+    return CaptureStorage.getSessionAudioFiles(sessionPath);
+  });
+
   ipcMain.handle("sessions:delete", async (_e, sessionPath: string) => {
     await CaptureStorage.deleteSession(sessionPath);
   });

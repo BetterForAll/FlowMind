@@ -368,6 +368,34 @@ body {
   margin-bottom: 12px;
 }
 
+.audio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.audio-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+.audio-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 60px;
+}
+
+.audio-item audio {
+  flex: 1;
+  height: 32px;
+}
+
 .screenshot-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

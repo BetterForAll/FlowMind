@@ -22,6 +22,7 @@ export function RawDataView() {
   const [totalSize, setTotalSize] = useState(0);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [screenshots, setScreenshots] = useState<string[]>([]);
+  const [audioFiles, setAudioFiles] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -51,11 +52,16 @@ export function RawDataView() {
     if (expandedSession === session.id) {
       setExpandedSession(null);
       setScreenshots([]);
+      setAudioFiles([]);
       return;
     }
     setExpandedSession(session.id);
-    const paths = await window.flowmind.getSessionScreenshots(session.path) as string[];
+    const [paths, audio] = await Promise.all([
+      window.flowmind.getSessionScreenshots(session.path) as Promise<string[]>,
+      window.flowmind.getSessionAudioFiles(session.path) as Promise<string[]>,
+    ]);
     setScreenshots(paths);
+    setAudioFiles(audio);
   };
 
   const deleteSession = async (session: SessionInfo) => {
@@ -150,21 +156,42 @@ export function RawDataView() {
                       Delete Session
                     </button>
                   </div>
-                  {screenshots.length > 0 ? (
-                    <div className="screenshot-grid">
-                      {screenshots.map((ssPath) => (
-                        <div key={ssPath} className="screenshot-thumb">
-                          <img
-                            src={`flowmind://file/${encodeURIComponent(ssPath.replace(/\\/g, "/"))}`}
-                            alt="screenshot"
-                            loading="lazy"
-                          />
-                          <div className="screenshot-time">
-                            {new Date(parseInt(ssPath.match(/(\d+)\.jpg/)?.[1] ?? "0")).toLocaleTimeString()}
+                  {audioFiles.length > 0 && (
+                    <>
+                      <div className="section-title" style={{ marginTop: 8 }}>Audio ({audioFiles.length} chunks)</div>
+                      <div className="audio-list">
+                        {audioFiles.map((audioPath, i) => (
+                          <div key={audioPath} className="audio-item">
+                            <span className="audio-label">Chunk {i + 1}</span>
+                            <audio
+                              controls
+                              preload="none"
+                              src={`flowmind://file/${encodeURIComponent(audioPath.replace(/\\/g, "/"))}`}
+                            />
                           </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  {screenshots.length > 0 ? (
+                    <>
+                      <div className="section-title" style={{ marginTop: 12 }}>Screenshots ({screenshots.length})</div>
+                      <div className="screenshot-grid">
+                        {screenshots.map((ssPath) => (
+                          <div key={ssPath} className="screenshot-thumb">
+                            <img
+                              src={`flowmind://file/${encodeURIComponent(ssPath.replace(/\\/g, "/"))}`}
+                              alt="screenshot"
+                              loading="lazy"
+                            />
+                            <div className="screenshot-time">
+                              {new Date(parseInt(ssPath.match(/(\d+)\.jpg/)?.[1] ?? "0")).toLocaleTimeString()}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
                   ) : (
                     <p className="empty-state" style={{ padding: 16 }}>No screenshots in this session.</p>
                   )}

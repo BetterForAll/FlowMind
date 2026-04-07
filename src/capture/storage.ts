@@ -186,6 +186,16 @@ export class CaptureStorage {
       .map((f) => path.join(ssDir, f));
   }
 
+  static async getSessionAudioFiles(sessionPath: string): Promise<string[]> {
+    const audioDir = path.join(sessionPath, "audio");
+    if (!fs.existsSync(audioDir)) return [];
+    const files = await fsp.readdir(audioDir);
+    return files
+      .filter((f) => f.endsWith(".webm"))
+      .sort()
+      .map((f) => path.join(audioDir, f));
+  }
+
   static async deleteSession(sessionPath: string): Promise<void> {
     await fsp.rm(sessionPath, { recursive: true, force: true });
     // Clean up empty date directory
