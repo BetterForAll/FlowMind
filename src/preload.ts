@@ -21,6 +21,7 @@ const api = {
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   getSessionScreenshots: (sessionPath: string) => ipcRenderer.invoke("sessions:getScreenshots", sessionPath),
   getSessionAudioFiles: (sessionPath: string) => ipcRenderer.invoke("sessions:getAudioFiles", sessionPath),
+  getAudioDataUrl: (filePath: string) => ipcRenderer.invoke("sessions:getAudioDataUrl", filePath),
   deleteSession: (sessionPath: string) => ipcRenderer.invoke("sessions:delete", sessionPath),
   deleteAnalyzedSessions: () => ipcRenderer.invoke("sessions:deleteAnalyzed"),
   getTotalStorageSize: () => ipcRenderer.invoke("sessions:getTotalSize"),

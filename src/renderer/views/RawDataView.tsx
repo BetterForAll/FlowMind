@@ -22,7 +22,7 @@ export function RawDataView() {
   const [totalSize, setTotalSize] = useState(0);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [screenshots, setScreenshots] = useState<string[]>([]);
-  const [audioFiles, setAudioFiles] = useState<string[]>([]);
+  const [audioFiles, setAudioFiles] = useState<{ path: string; dataUrl: string }[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
@@ -56,12 +56,20 @@ export function RawDataView() {
       return;
     }
     setExpandedSession(session.id);
-    const [paths, audio] = await Promise.all([
+    const [paths, audioPaths] = await Promise.all([
       window.flowmind.getSessionScreenshots(session.path) as Promise<string[]>,
       window.flowmind.getSessionAudioFiles(session.path) as Promise<string[]>,
     ]);
     setScreenshots(paths);
-    setAudioFiles(audio);
+
+    // Load audio as data URLs for reliable playback
+    const audioWithUrls = await Promise.all(
+      audioPaths.map(async (p) => ({
+        path: p,
+        dataUrl: await window.flowmind.getAudioDataUrl(p) as string,
+      }))
+    );
+    setAudioFiles(audioWithUrls);
   };
 
   const deleteSession = async (session: SessionInfo) => {
@@ -160,13 +168,13 @@ export function RawDataView() {
                     <>
                       <div className="section-title" style={{ marginTop: 8 }}>Audio ({audioFiles.length} chunks)</div>
                       <div className="audio-list">
-                        {audioFiles.map((audioPath, i) => (
-                          <div key={audioPath} className="audio-item">
-                            <span className="audio-label">Chunk {i + 1}</span>
+                        {audioFiles.map((audio, i) => (
+                          <div key={audio.path} className="audio-item">
+                            <span className="audio-label">Recording {i + 1}</span>
                             <audio
                               controls
-                              preload="none"
-                              src={`flowmind://file/${encodeURIComponent(audioPath.replace(/\\/g, "/"))}`}
+                              preload="metadata"
+                              src={audio.dataUrl}
                             />
                           </div>
                         ))}

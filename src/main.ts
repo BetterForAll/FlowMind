@@ -216,6 +216,14 @@ function setupIPC(): void {
     return CaptureStorage.getSessionAudioFiles(sessionPath);
   });
 
+  // Return audio file as base64 data URL for reliable playback
+  ipcMain.handle("sessions:getAudioDataUrl", async (_e, filePath: string) => {
+    const fsp = await import("node:fs/promises");
+    const buffer = await fsp.readFile(filePath);
+    const base64 = buffer.toString("base64");
+    return `data:audio/webm;base64,${base64}`;
+  });
+
   ipcMain.handle("sessions:delete", async (_e, sessionPath: string) => {
     await CaptureStorage.deleteSession(sessionPath);
   });
