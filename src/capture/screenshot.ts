@@ -41,22 +41,28 @@ export class ScreenshotCapture extends EventEmitter {
       });
 
       if (sources.length === 0) return;
+      if (!this.storage.getSessionDir()) return;
 
-      const thumbnail = sources[0].thumbnail;
-      const jpegBuffer = thumbnail.toJPEG(70);
+      // Capture ALL screens, not just the first one
+      for (let i = 0; i < sources.length; i++) {
+        const thumbnail = sources[i].thumbnail;
+        if (thumbnail.isEmpty()) continue;
 
-      if (!this.storage.getSessionDir()) return; // Session may have ended
-      const filePath = await this.storage.saveScreenshot(
-        Buffer.from(jpegBuffer),
-        now
-      );
+        const jpegBuffer = thumbnail.toJPEG(70);
+        const timestamp = now + i; // Offset by 1ms per screen to avoid filename collision
 
-      const event: CaptureEvent = {
-        ts: new Date(now).toISOString(),
-        type: "screenshot",
-        data: { file: filePath },
-      };
-      this.emit("event", event);
+        const filePath = await this.storage.saveScreenshot(
+          Buffer.from(jpegBuffer),
+          timestamp
+        );
+
+        const event: CaptureEvent = {
+          ts: new Date(now).toISOString(),
+          type: "screenshot",
+          data: { file: filePath, screen: i, screenName: sources[i].name },
+        };
+        this.emit("event", event);
+      }
     } catch (err) {
       console.error("Screenshot capture failed:", err);
     }
