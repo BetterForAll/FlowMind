@@ -77,7 +77,7 @@ window.flowmind.onAudioStartRecording(async () => {
         window.flowmind.sendAudioChunk(buffer);
       }
     };
-    mediaRecorder.start(60_000); // 1-minute chunks
+    mediaRecorder.start(10_000); // 10-second chunks
     console.log("[FlowMind] Audio recording started");
   } catch (err) {
     console.error("[FlowMind] Failed to start recording:", err);
@@ -86,6 +86,8 @@ window.flowmind.onAudioStartRecording(async () => {
 
 window.flowmind.onAudioStopRecording(() => {
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    // requestData() forces a final chunk before stopping
+    mediaRecorder.requestData();
     mediaRecorder.stop();
   }
   if (recordStream) {
