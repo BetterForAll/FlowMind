@@ -175,6 +175,18 @@ export function RawDataView() {
                               controls
                               preload="auto"
                               src={audio.dataUrl}
+                              onLoadedMetadata={(e) => {
+                                // WebM from MediaRecorder often has Infinity duration
+                                // Force browser to calculate real duration
+                                const el = e.currentTarget;
+                                if (!isFinite(el.duration)) {
+                                  el.currentTime = 1e10;
+                                  el.addEventListener("timeupdate", function fix() {
+                                    el.removeEventListener("timeupdate", fix);
+                                    el.currentTime = 0;
+                                  });
+                                }
+                              }}
                             />
                           </div>
                         ))}
