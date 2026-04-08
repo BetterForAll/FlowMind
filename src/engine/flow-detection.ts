@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { FlowStore } from "./flow-store";
+import { AudioTranscriber } from "./audio-transcription";
 import { CaptureStorage } from "../capture/storage";
 import type {
   DetectionResult,
@@ -16,11 +17,32 @@ const DETECTION_PROMPT = `You are FlowMind, an AI that analyzes screen activity 
 
 Analyze the following user activity timeline and produce a JSON response with detected flows and knowledge.
 
-RULES:
+CLASSIFICATION CRITERIA — follow these strictly:
+
+COMPLETE FLOW — ALL of these must be true:
+- A multi-step sequence (3+ distinct, meaningful steps) with a clear beginning and end
+- Steps have enough detail to be reproduced by someone else
+- Decision logic is observable (not guessed or hedged with "potentially"/"might")
+- The flow involves purposeful work, not just opening/closing apps or browsing
+
+PARTIAL FLOW — use when:
+- You see a meaningful multi-step sequence but some steps are unclear or missing
+- You can identify gaps that need clarification from the user
+- Mark gaps with [GAP] and provide specific questions to fill them
+
+KNOWLEDGE FRAGMENT — use for everything else:
+- Single observations, habits, preferences, tool usage patterns
+- Simple actions like "user opened app X" or "user watched a video"
+- Behavioral patterns that are not actionable workflows
+- One-time activities or browsing/exploration behavior
+
+IMPORTANT:
+- Do NOT mark a flow as "complete" if you are guessing or hedging any steps
+- A single activity (watching a video, checking email) is a knowledge fragment, NOT a flow
 - Be SPECIFIC — reference actual app names, window titles, and actions observed
-- Identify sequences of actions that form coherent workflows
-- Look for conditional behavior, loops, and decision points
 - Never include sensitive data (passwords, tokens, personal message content)
+- When audio transcript is available, use it to understand VERBAL context: conversations, spoken explanations, voice commands, meetings, video calls
+- Correlate spoken context with visual activity
 - If the activity is mostly idle or has no meaningful patterns, return empty arrays
 
 Respond with ONLY valid JSON in this exact format:
@@ -64,6 +86,7 @@ Respond with ONLY valid JSON in this exact format:
 export class FlowDetectionEngine {
   private store: FlowStore;
   private genai: GoogleGenAI;
+  private transcriber: AudioTranscriber;
   private running = false;
 
   constructor(store: FlowStore) {
@@ -74,6 +97,7 @@ export class FlowDetectionEngine {
       throw new Error("GEMINI_API_KEY environment variable is required");
     }
     this.genai = new GoogleGenAI({ apiKey });
+    this.transcriber = new AudioTranscriber(this.genai);
   }
 
   isRunning(): boolean {
@@ -115,11 +139,14 @@ export class FlowDetectionEngine {
 
       const timeline = this.buildTimeline(events);
 
-      // 3. Collect screenshots for multimodal analysis (max 20)
+      // 3. Transcribe audio files
+      const transcript = await this.transcriber.transcribeSessions(sessionDirs);
+
+      // 4. Collect screenshots for multimodal analysis (max 20)
       const screenshots = await this.loadScreenshots(sessionDirs, 20);
 
-      // 4. Send to Gemini for analysis
-      const analysis = await this.analyzeWithGemini(timeline, screenshots);
+      // 5. Send to Gemini for analysis
+      const analysis = await this.analyzeWithGemini(timeline, screenshots, transcript);
 
       // 5. Save results
       const result = await this.saveResults(analysis);
@@ -214,12 +241,20 @@ export class FlowDetectionEngine {
 
   private async analyzeWithGemini(
     timeline: string,
-    screenshots: { ts: string; base64: string }[]
+    screenshots: { ts: string; base64: string }[],
+    transcript?: string
   ): Promise<GeminiAnalysis> {
     const parts: { text?: string; inlineData?: { mimeType: string; data: string } }[] = [
       { text: DETECTION_PROMPT },
       { text: `\n\n## Activity Timeline\n\n${timeline}` },
     ];
+
+    // Add audio transcript if available
+    if (transcript) {
+      parts.push({
+        text: `\n\n## Audio Transcript\n\nThe following is a transcript of audio captured during this session (system audio + microphone). Use this to understand verbal context — conversations, explanations, voice commands, meetings, video calls, etc.\n\n${transcript}`,
+      });
+    }
 
     // Add screenshots as inline images
     if (screenshots.length > 0) {

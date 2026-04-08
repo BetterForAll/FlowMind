@@ -14,6 +14,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [submitting, setSubmitting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generatedContent, setGeneratedContent] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -51,9 +52,14 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const generateAutomation = async (format: string) => {
     setGenerating(true);
     setGeneratedContent(null);
+    setGenerateError(null);
     try {
       const result = await window.flowmind.generateAutomation(flowId, format);
       setGeneratedContent(result.content);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setGenerateError(message);
+      console.error("[FlowMind] Automation generation failed:", err);
     } finally {
       setGenerating(false);
     }
@@ -180,6 +186,11 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           {generating && (
             <div style={{ marginTop: 16, color: "var(--text-muted)" }}>
               Generating...
+            </div>
+          )}
+          {generateError && (
+            <div style={{ marginTop: 16, color: "var(--red, #e55)" }}>
+              Error: {generateError}
             </div>
           )}
           {generatedContent && (

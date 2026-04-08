@@ -7,6 +7,10 @@ let mediaRecorder: MediaRecorder | null = null;
 let micStream: MediaStream | null = null;
 let systemStream: MediaStream | null = null;
 let mixAudioCtx: AudioContext | null = null;
+let flushInterval: ReturnType<typeof setInterval> | null = null;
+let destinationStream: MediaStream | null = null; // keep ref for restart after flush
+
+const FLUSH_INTERVAL_MS = 5 * 60 * 1000; // Flush audio to disk every 5 minutes
 
 // Get system audio stream via desktopCapturer
 async function getSystemAudioStream(): Promise<MediaStream | null> {
@@ -40,6 +44,37 @@ async function getSystemAudioStream(): Promise<MediaStream | null> {
 
 // Actual recording — captures system audio + mic mixed together
 let recordedChunks: Blob[] = [];
+let isFlushing = false; // true during stop/restart cycle for periodic flush
+
+function startMediaRecorder(): void {
+  if (!destinationStream) return;
+  mediaRecorder = new MediaRecorder(destinationStream, {
+    mimeType: "audio/webm;codecs=opus",
+  });
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) {
+      recordedChunks.push(e.data);
+    }
+  };
+  mediaRecorder.onstop = async () => {
+    // Send accumulated chunks to main process
+    if (recordedChunks.length > 0) {
+      const blob = new Blob(recordedChunks, { type: "audio/webm;codecs=opus" });
+      const buffer = await blob.arrayBuffer();
+      window.flowmind.sendAudioChunk(buffer);
+      console.log(`[FlowMind] Audio flushed: ${(buffer.byteLength / 1024).toFixed(1)} KB`);
+    }
+    recordedChunks = [];
+
+    // If this was a periodic flush (not a final stop), restart immediately
+    if (isFlushing) {
+      isFlushing = false;
+      startMediaRecorder();
+      console.log("[FlowMind] Audio recorder restarted after flush");
+    }
+  };
+  mediaRecorder.start(5_000);
+}
 
 window.flowmind.onAudioStartRecording(async () => {
   try {
@@ -71,33 +106,32 @@ window.flowmind.onAudioStartRecording(async () => {
       console.log("[FlowMind] Recording: mic only (system audio unavailable)");
     }
 
-    mediaRecorder = new MediaRecorder(destination.stream, {
-      mimeType: "audio/webm;codecs=opus",
-    });
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        recordedChunks.push(e.data);
+    destinationStream = destination.stream;
+    startMediaRecorder();
+
+    // Periodic flush: stop recorder every 5 min, send data, restart
+    flushInterval = setInterval(() => {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        isFlushing = true;
+        mediaRecorder.stop(); // triggers onstop which sends data + restarts
       }
-    };
-    mediaRecorder.onstop = async () => {
-      if (recordedChunks.length > 0) {
-        const blob = new Blob(recordedChunks, { type: "audio/webm;codecs=opus" });
-        const buffer = await blob.arrayBuffer();
-        window.flowmind.sendAudioChunk(buffer);
-        console.log(`[FlowMind] Audio saved: ${(buffer.byteLength / 1024).toFixed(1)} KB`);
-      }
-      recordedChunks = [];
-    };
-    mediaRecorder.start(5_000);
-    console.log("[FlowMind] Audio recording started");
+    }, FLUSH_INTERVAL_MS);
+
+    console.log("[FlowMind] Audio recording started (flush every 5 min)");
   } catch (err) {
     console.error("[FlowMind] Failed to start recording:", err);
   }
 });
 
 window.flowmind.onAudioStopRecording(() => {
+  isFlushing = false;
+
+  if (flushInterval) {
+    clearInterval(flushInterval);
+    flushInterval = null;
+  }
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
+    mediaRecorder.stop(); // triggers onstop which sends remaining data
   }
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
@@ -111,6 +145,7 @@ window.flowmind.onAudioStopRecording(() => {
     mixAudioCtx.close();
     mixAudioCtx = null;
   }
+  destinationStream = null;
   mediaRecorder = null;
   console.log("[FlowMind] Audio recording stopped");
 });
