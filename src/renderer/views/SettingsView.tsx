@@ -36,11 +36,14 @@ const MODE_INFO: Record<FlowMode, { label: string; desc: string }> = {
   },
 };
 
-const MODE_DEFAULTS: Record<FlowMode, { transcription: string; detection: string; automation: string }> = {
-  economy: { transcription: "gemini-2.5-flash-lite", detection: "gemini-2.5-flash-lite", automation: "gemini-2.5-flash-lite" },
-  standard: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-flash", automation: "gemini-2.5-flash" },
-  pro: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-pro", automation: "gemini-2.5-pro" },
-  maximum: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-pro", automation: "gemini-2.5-pro" },
+const MODE_DEFAULTS: Record<FlowMode, {
+  transcription: string; detection: string; automation: string;
+  resolution: string; quality: number; thinking: boolean;
+}> = {
+  economy: { transcription: "gemini-2.5-flash-lite", detection: "gemini-2.5-flash-lite", automation: "gemini-2.5-flash-lite", resolution: "960x540", quality: 60, thinking: false },
+  standard: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-flash", automation: "gemini-2.5-flash", resolution: "960x540", quality: 70, thinking: false },
+  pro: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-pro", automation: "gemini-2.5-pro", resolution: "1280x720", quality: 75, thinking: false },
+  maximum: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-pro", automation: "gemini-2.5-pro", resolution: "1280x720", quality: 80, thinking: true },
 };
 
 const GEMINI_MODELS = [
@@ -49,12 +52,7 @@ const GEMINI_MODELS = [
   { value: "gemini-2.5-pro", label: "Pro" },
 ];
 
-function modelLabel(model: string): string {
-  return GEMINI_MODELS.find((m) => m.value === model)?.label ?? model;
-}
-
 const RESOLUTION_OPTIONS = [
-  { value: "", label: "Use mode default" },
   { value: "960x540", label: "960×540 (smaller files)" },
   { value: "1280x720", label: "1280×720 (more detail)" },
   { value: "1920x1080", label: "1920×1080 (full HD)" },
@@ -89,7 +87,7 @@ export function SettingsView() {
   const defaults = MODE_DEFAULTS[settings.mode];
   const resolutionValue = settings.screenshotResolution
     ? `${settings.screenshotResolution.width}x${settings.screenshotResolution.height}`
-    : "";
+    : defaults.resolution;
 
   return (
     <>
@@ -116,9 +114,16 @@ export function SettingsView() {
                 value={mode}
                 checked={settings.mode === mode}
                 onChange={() => {
+                  const d = MODE_DEFAULTS[mode];
+                  const [w, h] = d.resolution.split("x").map(Number);
                   update({
                     mode,
-                    thinking: mode === "maximum",
+                    thinking: d.thinking,
+                    transcriptionModel: d.transcription,
+                    detectionModel: d.detection,
+                    automationModel: d.automation,
+                    screenshotResolution: { width: w, height: h },
+                    screenshotQuality: d.quality,
                   });
                 }}
                 style={{ display: "none" }}
@@ -158,10 +163,9 @@ export function SettingsView() {
             Transcription
             <select
               className="settings-select"
-              value={settings.transcriptionModel ?? ""}
-              onChange={(e) => update({ transcriptionModel: e.target.value || null })}
+              value={settings.transcriptionModel ?? defaults.transcription}
+              onChange={(e) => update({ transcriptionModel: e.target.value })}
             >
-              <option value="">Default ({modelLabel(defaults.transcription)})</option>
               {GEMINI_MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -171,10 +175,9 @@ export function SettingsView() {
             Detection
             <select
               className="settings-select"
-              value={settings.detectionModel ?? ""}
-              onChange={(e) => update({ detectionModel: e.target.value || null })}
+              value={settings.detectionModel ?? defaults.detection}
+              onChange={(e) => update({ detectionModel: e.target.value })}
             >
-              <option value="">Default ({modelLabel(defaults.detection)})</option>
               {GEMINI_MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -184,10 +187,9 @@ export function SettingsView() {
             Automation
             <select
               className="settings-select"
-              value={settings.automationModel ?? ""}
-              onChange={(e) => update({ automationModel: e.target.value || null })}
+              value={settings.automationModel ?? defaults.automation}
+              onChange={(e) => update({ automationModel: e.target.value })}
             >
-              <option value="">Default ({modelLabel(defaults.automation)})</option>
               {GEMINI_MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -238,12 +240,8 @@ export function SettingsView() {
               className="settings-select"
               value={resolutionValue}
               onChange={(e) => {
-                if (!e.target.value) {
-                  update({ screenshotResolution: null });
-                } else {
-                  const [w, h] = e.target.value.split("x").map(Number);
-                  update({ screenshotResolution: { width: w, height: h } });
-                }
+                const [w, h] = e.target.value.split("x").map(Number);
+                update({ screenshotResolution: { width: w, height: h } });
               }}
             >
               {RESOLUTION_OPTIONS.map((r) => (
@@ -255,10 +253,9 @@ export function SettingsView() {
             JPEG quality
             <select
               className="settings-select"
-              value={settings.screenshotQuality ?? ""}
-              onChange={(e) => update({ screenshotQuality: e.target.value ? parseInt(e.target.value) : null })}
+              value={settings.screenshotQuality ?? defaults.quality}
+              onChange={(e) => update({ screenshotQuality: parseInt(e.target.value) })}
             >
-              <option value="">Use mode default</option>
               <option value={50}>50% (smallest files)</option>
               <option value={60}>60%</option>
               <option value={70}>70%</option>
