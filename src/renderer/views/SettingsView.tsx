@@ -292,7 +292,7 @@ export function SettingsView() {
       <div className="settings-section">
         <h2 className="settings-heading">Gemini API Key</h2>
         <p className="settings-desc">
-          Optional. If not set, uses the GEMINI_API_KEY from your .env file.
+          Required for AI analysis. Get your key from Google AI Studio.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input
