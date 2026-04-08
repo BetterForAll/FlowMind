@@ -17,35 +17,41 @@ interface Settings {
   geminiApiKey: string | null;
 }
 
-const MODE_INFO: Record<FlowMode, { label: string; desc: string; cost: string }> = {
+const MODE_INFO: Record<FlowMode, { label: string; desc: string }> = {
   economy: {
     label: "Economy",
-    desc: "Gemini Flash Lite for all tasks. Lowest cost, basic quality.",
-    cost: "~$8/month",
+    desc: "Gemini Flash Lite for all tasks. Basic quality.",
   },
   standard: {
     label: "Standard",
-    desc: "Gemini Flash for all tasks. Good balance of cost and quality.",
-    cost: "~$25/month",
+    desc: "Gemini Flash for all tasks. Good balance.",
   },
   pro: {
     label: "Pro",
     desc: "Gemini Pro for detection & automation. Higher accuracy.",
-    cost: "~$80/month",
   },
   maximum: {
     label: "Maximum",
     desc: "Gemini Pro with extended thinking. Deepest analysis.",
-    cost: "~$120/month",
   },
 };
 
+const MODE_DEFAULTS: Record<FlowMode, { transcription: string; detection: string; automation: string }> = {
+  economy: { transcription: "gemini-2.5-flash-lite", detection: "gemini-2.5-flash-lite", automation: "gemini-2.5-flash-lite" },
+  standard: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-flash", automation: "gemini-2.5-flash" },
+  pro: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-pro", automation: "gemini-2.5-pro" },
+  maximum: { transcription: "gemini-2.5-flash", detection: "gemini-2.5-pro", automation: "gemini-2.5-pro" },
+};
+
 const GEMINI_MODELS = [
-  { value: "", label: "Use mode default" },
-  { value: "gemini-2.5-flash-lite", label: "Flash Lite (cheapest)" },
-  { value: "gemini-2.5-flash", label: "Flash (balanced)" },
-  { value: "gemini-2.5-pro", label: "Pro (best quality)" },
+  { value: "gemini-2.5-flash-lite", label: "Flash Lite" },
+  { value: "gemini-2.5-flash", label: "Flash" },
+  { value: "gemini-2.5-pro", label: "Pro" },
 ];
+
+function modelLabel(model: string): string {
+  return GEMINI_MODELS.find((m) => m.value === model)?.label ?? model;
+}
 
 const RESOLUTION_OPTIONS = [
   { value: "", label: "Use mode default" },
@@ -70,16 +76,17 @@ export function SettingsView() {
     window.flowmind.getSettings().then((s) => setSettings(s as Settings));
   }, []);
 
-  const update = async (key: string, value: unknown) => {
-    const updated = { ...settings!, [key]: value };
-    setSettings(updated);
-    await window.flowmind.updateSettings({ [key]: value });
+  const update = async (updates: Record<string, unknown>) => {
+    const updated = { ...settings!, ...updates };
+    setSettings(updated as Settings);
+    await window.flowmind.updateSettings(updates);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
 
   if (!settings) return <div className="empty-state"><p>Loading...</p></div>;
 
+  const defaults = MODE_DEFAULTS[settings.mode];
   const resolutionValue = settings.screenshotResolution
     ? `${settings.screenshotResolution.width}x${settings.screenshotResolution.height}`
     : "";
@@ -109,16 +116,15 @@ export function SettingsView() {
                 value={mode}
                 checked={settings.mode === mode}
                 onChange={() => {
-                  update("mode", mode);
-                  // Reset thinking based on mode default
-                  if (mode === "maximum") update("thinking", true);
-                  else update("thinking", false);
+                  update({
+                    mode,
+                    thinking: mode === "maximum",
+                  });
                 }}
                 style={{ display: "none" }}
               />
               <div className="mode-card-title">{info.label}</div>
               <div className="mode-card-desc">{info.desc}</div>
-              <div className="mode-card-cost">{info.cost}</div>
             </label>
           ))}
         </div>
@@ -135,7 +141,7 @@ export function SettingsView() {
           <input
             type="checkbox"
             checked={settings.thinking}
-            onChange={(e) => update("thinking", e.target.checked)}
+            onChange={(e) => update({ thinking: e.target.checked })}
           />
           <span>Enable extended thinking</span>
         </label>
@@ -153,8 +159,9 @@ export function SettingsView() {
             <select
               className="settings-select"
               value={settings.transcriptionModel ?? ""}
-              onChange={(e) => update("transcriptionModel", e.target.value || null)}
+              onChange={(e) => update({ transcriptionModel: e.target.value || null })}
             >
+              <option value="">Default ({modelLabel(defaults.transcription)})</option>
               {GEMINI_MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -165,8 +172,9 @@ export function SettingsView() {
             <select
               className="settings-select"
               value={settings.detectionModel ?? ""}
-              onChange={(e) => update("detectionModel", e.target.value || null)}
+              onChange={(e) => update({ detectionModel: e.target.value || null })}
             >
+              <option value="">Default ({modelLabel(defaults.detection)})</option>
               {GEMINI_MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -177,8 +185,9 @@ export function SettingsView() {
             <select
               className="settings-select"
               value={settings.automationModel ?? ""}
-              onChange={(e) => update("automationModel", e.target.value || null)}
+              onChange={(e) => update({ automationModel: e.target.value || null })}
             >
+              <option value="">Default ({modelLabel(defaults.automation)})</option>
               {GEMINI_MODELS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -196,7 +205,7 @@ export function SettingsView() {
         <select
           className="settings-select"
           value={settings.detectionIntervalMinutes}
-          onChange={(e) => update("detectionIntervalMinutes", parseInt(e.target.value))}
+          onChange={(e) => update({ detectionIntervalMinutes: parseInt(e.target.value) })}
         >
           <option value={5}>Every 5 minutes</option>
           <option value={10}>Every 10 minutes</option>
@@ -215,7 +224,7 @@ export function SettingsView() {
             <select
               className="settings-select"
               value={settings.screenshotIntervalMs}
-              onChange={(e) => update("screenshotIntervalMs", parseInt(e.target.value))}
+              onChange={(e) => update({ screenshotIntervalMs: parseInt(e.target.value) })}
             >
               <option value={1000}>Every 1 second</option>
               <option value={2000}>Every 2 seconds</option>
@@ -230,10 +239,10 @@ export function SettingsView() {
               value={resolutionValue}
               onChange={(e) => {
                 if (!e.target.value) {
-                  update("screenshotResolution", null);
+                  update({ screenshotResolution: null });
                 } else {
                   const [w, h] = e.target.value.split("x").map(Number);
-                  update("screenshotResolution", { width: w, height: h });
+                  update({ screenshotResolution: { width: w, height: h } });
                 }
               }}
             >
@@ -247,7 +256,7 @@ export function SettingsView() {
             <select
               className="settings-select"
               value={settings.screenshotQuality ?? ""}
-              onChange={(e) => update("screenshotQuality", e.target.value ? parseInt(e.target.value) : null)}
+              onChange={(e) => update({ screenshotQuality: e.target.value ? parseInt(e.target.value) : null })}
             >
               <option value="">Use mode default</option>
               <option value={50}>50% (smallest files)</option>
@@ -274,7 +283,7 @@ export function SettingsView() {
                 name="cleanupMode"
                 value={opt.value}
                 checked={settings.cleanupMode === opt.value}
-                onChange={() => update("cleanupMode", opt.value)}
+                onChange={() => update({ cleanupMode: opt.value })}
               />
               <span>{opt.label}</span>
             </label>
@@ -294,7 +303,7 @@ export function SettingsView() {
             className="settings-input"
             placeholder="Enter Gemini API key..."
             value={settings.geminiApiKey ?? ""}
-            onChange={(e) => update("geminiApiKey", e.target.value || null)}
+            onChange={(e) => update({ geminiApiKey: e.target.value || null })}
             style={{ flex: 1 }}
           />
           <button
@@ -314,7 +323,7 @@ export function SettingsView() {
           <input
             type="checkbox"
             checked={settings.showRawData}
-            onChange={(e) => update("showRawData", e.target.checked)}
+            onChange={(e) => update({ showRawData: e.target.checked })}
           />
           <span>Show Raw Data tab</span>
         </label>
