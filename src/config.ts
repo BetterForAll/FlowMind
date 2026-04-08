@@ -31,7 +31,7 @@ const DEFAULTS: AppConfig = {
   detectionIntervalMinutes: 15,
   screenshotIntervalMs: 2000,
   thinking: false,
-  showRawData: false,
+  showRawData: true,
   transcriptionModel: null,
   detectionModel: null,
   automationModel: null,
