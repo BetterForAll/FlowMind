@@ -14,6 +14,7 @@ const MAX_RETRIES = 3;
 
 export class AudioTranscriber {
   private genai: GoogleGenAI;
+  private model = "gemini-2.5-flash";
 
   constructor(genai: GoogleGenAI) {
     this.genai = genai;
@@ -23,7 +24,8 @@ export class AudioTranscriber {
    * Transcribe all audio files from the given session directories.
    * Returns concatenated transcript text, or empty string if no audio.
    */
-  async transcribeSessions(sessionDirs: string[]): Promise<string> {
+  async transcribeSessions(sessionDirs: string[], model?: string): Promise<string> {
+    this.model = model ?? "gemini-2.5-flash";
     const audioFiles = await this.collectAudioFiles(sessionDirs);
     if (audioFiles.length === 0) return "";
 
@@ -90,7 +92,7 @@ export class AudioTranscriber {
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
         const response = await this.genai.models.generateContent({
-          model: "gemini-2.5-flash-lite",
+          model: this.model,
           contents: [
             {
               role: "user",

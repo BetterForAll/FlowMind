@@ -21,7 +21,6 @@ let flowStore: FlowStore;
 let interviewEngine: InterviewEngine;
 let captureOrchestrator: CaptureOrchestrator;
 let detectionInterval: ReturnType<typeof setInterval> | null = null;
-let cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -288,11 +287,13 @@ app.whenReady().then(async () => {
   createTray();
   createWindow();
 
-  // Run detection every 60 minutes
-  detectionInterval = setInterval(runDetection, 60 * 60 * 1000);
+  // Run detection at configured interval (default 15 min)
+  const config = await loadConfig();
+  const intervalMs = config.detectionIntervalMinutes * 60 * 1000;
+  detectionInterval = setInterval(runDetection, intervalMs);
+  console.log(`[FlowMind] Detection interval: ${config.detectionIntervalMinutes} min`);
 
-  // Auto-cleanup analyzed sessions every hour
-  cleanupInterval = setInterval(() => runCleanup(), 60 * 60 * 1000);
+  // Cleanup runs after each detection (in runDetection), no separate timer needed
 });
 
 app.on("window-all-closed", () => {
@@ -307,7 +308,6 @@ app.on("activate", () => {
 
 app.on("before-quit", async () => {
   if (detectionInterval) clearInterval(detectionInterval);
-  if (cleanupInterval) clearInterval(cleanupInterval);
   await captureOrchestrator.stop();
   tray = null;
 });

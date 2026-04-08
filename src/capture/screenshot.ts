@@ -9,10 +9,17 @@ export class ScreenshotCapture extends EventEmitter {
   private running = false;
   private storage: CaptureStorage;
   private lastCapture = 0;
+  private resolution = { width: 1920, height: 1080 };
+  private jpegQuality = 70;
 
   constructor(storage: CaptureStorage) {
     super();
     this.storage = storage;
+  }
+
+  configure(opts: { resolution?: { width: number; height: number }; jpegQuality?: number }): void {
+    if (opts.resolution) this.resolution = opts.resolution;
+    if (opts.jpegQuality) this.jpegQuality = opts.jpegQuality;
   }
 
   start(): void {
@@ -37,7 +44,7 @@ export class ScreenshotCapture extends EventEmitter {
     try {
       const sources = await desktopCapturer.getSources({
         types: ["screen"],
-        thumbnailSize: { width: 1920, height: 1080 },
+        thumbnailSize: this.resolution,
       });
 
       if (sources.length === 0) return;
@@ -48,7 +55,7 @@ export class ScreenshotCapture extends EventEmitter {
         const thumbnail = sources[i].thumbnail;
         if (thumbnail.isEmpty()) continue;
 
-        const jpegBuffer = thumbnail.toJPEG(70);
+        const jpegBuffer = thumbnail.toJPEG(this.jpegQuality);
         const timestamp = now + i; // Offset by 1ms per screen to avoid filename collision
 
         const filePath = await this.storage.saveScreenshot(

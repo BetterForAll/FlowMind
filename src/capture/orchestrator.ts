@@ -5,6 +5,8 @@ import { ScreenshotCapture } from "./screenshot";
 import { AudioCapture } from "./audio";
 import { SessionManager } from "./session";
 import { CaptureStorage } from "./storage";
+import { loadConfig } from "../config";
+import { getEffectiveSettings } from "../ai/mode-presets";
 import type { CaptureEvent, CaptureStats } from "../types";
 import type { BrowserWindow } from "electron";
 
@@ -50,6 +52,14 @@ export class CaptureOrchestrator extends EventEmitter {
       ts: new Date().toISOString(),
       type: "session-start",
       data: { sessionId },
+    });
+
+    // Apply mode settings to screenshot capture
+    const config = await loadConfig();
+    const settings = getEffectiveSettings(config);
+    this.screenshot.configure({
+      resolution: settings.resolution,
+      jpegQuality: settings.jpegQuality,
     });
 
     this.input.start();

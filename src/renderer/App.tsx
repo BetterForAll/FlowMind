@@ -16,6 +16,7 @@ export function App() {
   const [partialFlows, setPartialFlows] = useState<FlowDocument[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeDocument[]>([]);
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
+  const [showRawData, setShowRawData] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -35,6 +36,10 @@ export function App() {
 
   useEffect(() => {
     loadData();
+    // Load showRawData setting
+    window.flowmind.getSettings().then((s: Record<string, unknown>) => {
+      setShowRawData(!!s.showRawData);
+    });
 
     const unsub1 = window.flowmind.onDetectionStatus(setDetectionStatus);
     const unsub2 = window.flowmind.onDetectionResults(() => loadData());
@@ -84,12 +89,14 @@ export function App() {
           >
             Knowledge
           </button>
-          <button
-            className={`nav-item ${view === "raw-data" ? "active" : ""}`}
-            onClick={() => setView("raw-data")}
-          >
-            Raw Data
-          </button>
+          {showRawData && (
+            <button
+              className={`nav-item ${view === "raw-data" ? "active" : ""}`}
+              onClick={() => setView("raw-data")}
+            >
+              Raw Data
+            </button>
+          )}
           <button
             className={`nav-item ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}

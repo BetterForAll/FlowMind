@@ -5,7 +5,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { FlowStore } from "./flow-store";
 import { AudioTranscriber } from "./audio-transcription";
+import { aggregateEvents } from "./event-aggregator";
 import { CaptureStorage } from "../capture/storage";
+import { loadConfig } from "../config";
+import { getEffectiveSettings, tokensPerImage, fitsInOneCall } from "../ai/mode-presets";
 import type {
   DetectionResult,
   FlowFrontmatter,
@@ -111,47 +114,43 @@ export class FlowDetectionEngine {
 
     this.running = true;
     try {
-      // 1. Gather data from local capture sessions
-      const since = new Date(Date.now() - 60 * 60 * 1000);
+      const config = await loadConfig();
+      const settings = getEffectiveSettings(config);
+
+      // 1. Gather data from recent sessions (based on analysis interval)
+      const intervalMs = config.detectionIntervalMinutes * 60 * 1000;
+      const since = new Date(Date.now() - intervalMs);
       const sessionDirs = await CaptureStorage.getRecentSessionDirs(since);
 
-      if (sessionDirs.length === 0) {
-        return {
-          newComplete: 0,
-          updatedComplete: 0,
-          newPartial: 0,
-          newKnowledge: 0,
-          filesWritten: [],
-        };
-      }
+      const emptyResult: DetectionResult = {
+        newComplete: 0, updatedComplete: 0, newPartial: 0, newKnowledge: 0, filesWritten: [],
+      };
 
-      // 2. Build activity timeline from JSONL events
+      if (sessionDirs.length === 0) return emptyResult;
+
+      // 2. Load and aggregate events
       const events = await this.loadEvents(sessionDirs);
-      if (events.length === 0) {
-        return {
-          newComplete: 0,
-          updatedComplete: 0,
-          newPartial: 0,
-          newKnowledge: 0,
-          filesWritten: [],
-        };
-      }
-
-      const timeline = this.buildTimeline(events);
+      if (events.length === 0) return emptyResult;
+      const timeline = aggregateEvents(events);
+      console.log(`[Detection] Aggregated ${events.length} events into ${timeline.split("\n").length} lines`);
 
       // 3. Transcribe audio files
-      const transcript = await this.transcriber.transcribeSessions(sessionDirs);
+      const transcript = await this.transcriber.transcribeSessions(sessionDirs, settings.transcriptionModel);
 
-      // 4. Collect screenshots for multimodal analysis (max 20)
-      const screenshots = await this.loadScreenshots(sessionDirs, 20);
+      // 4. Load ALL screenshots
+      const screenshots = await this.loadAllScreenshots(sessionDirs);
+      console.log(`[Detection] Loaded ${screenshots.length} screenshots`);
 
-      // 5. Send to Gemini for analysis
-      const analysis = await this.analyzeWithGemini(timeline, screenshots, transcript);
+      // 5. Analyze — chunk if needed
+      const textTokens = (timeline.length + (transcript?.length ?? 0) + DETECTION_PROMPT.length) / 4; // rough estimate
+      const analysis = fitsInOneCall(screenshots.length, settings.resolution, textTokens, settings.contextLimit)
+        ? await this.analyzeWithGemini(settings, timeline, screenshots, transcript)
+        : await this.analyzeChunked(settings, timeline, screenshots, transcript);
 
-      // 5. Save results
+      // 6. Save results
       const result = await this.saveResults(analysis);
 
-      // 6. Mark sessions as analyzed
+      // 7. Mark sessions as analyzed
       await CaptureStorage.markAnalyzed(sessionDirs);
 
       return result;
@@ -178,10 +177,9 @@ export class FlowDetectionEngine {
     );
   }
 
-  private async loadScreenshots(
-    sessionDirs: string[],
-    max: number
-  ): Promise<{ ts: string; base64: string }[]> {
+  private async loadAllScreenshots(
+    sessionDirs: string[]
+  ): Promise<{ ts: string; base64: string; time: number }[]> {
     const screenshots: { ts: string; base64: string; time: number }[] = [];
     for (const dir of sessionDirs) {
       const ssDir = path.join(dir, "screenshots");
@@ -189,57 +187,23 @@ export class FlowDetectionEngine {
       const files = await fsp.readdir(ssDir);
       for (const file of files) {
         if (!file.endsWith(".jpg")) continue;
-        const ts = parseInt(file.replace(".jpg", ""), 10);
-        if (isNaN(ts)) continue;
+        const time = parseInt(file.replace(".jpg", ""), 10);
+        if (isNaN(time)) continue;
+        const filePath = path.join(ssDir, file);
+        const buffer = await fsp.readFile(filePath);
         screenshots.push({
-          ts: new Date(ts).toISOString(),
-          base64: "", // placeholder
-          time: ts,
+          ts: new Date(time).toISOString(),
+          base64: buffer.toString("base64"),
+          time,
         });
       }
     }
-
-    // Select evenly spaced screenshots
     screenshots.sort((a, b) => a.time - b.time);
-    const step = Math.max(1, Math.floor(screenshots.length / max));
-    const selected = screenshots.filter((_, i) => i % step === 0).slice(0, max);
-
-    // Load actual data for selected screenshots
-    for (const ss of selected) {
-      for (const dir of sessionDirs) {
-        const filePath = path.join(dir, "screenshots", `${ss.time}.jpg`);
-        if (fs.existsSync(filePath)) {
-          const buffer = await fsp.readFile(filePath);
-          ss.base64 = buffer.toString("base64");
-          break;
-        }
-      }
-    }
-
-    return selected.filter((s) => s.base64).map(({ ts, base64 }) => ({ ts, base64 }));
-  }
-
-  private buildTimeline(events: CaptureEvent[]): string {
-    return events
-      .filter((e) => e.type !== "session-start" && e.type !== "session-end" && e.type !== "screenshot")
-      .map((e) => {
-        switch (e.type) {
-          case "window-change":
-            return `${e.ts}: [${e.data.app}] "${e.data.title}"`;
-          case "click":
-            return `${e.ts}: Click at (${e.data.x}, ${e.data.y}) button=${e.data.button}`;
-          case "keypress":
-            return `${e.ts}: Keypress code=${e.data.keycode}${e.data.ctrl ? " +Ctrl" : ""}${e.data.alt ? " +Alt" : ""}${e.data.meta ? " +Meta" : ""}`;
-          case "scroll":
-            return `${e.ts}: Scroll at (${e.data.x}, ${e.data.y})`;
-          default:
-            return `${e.ts}: ${e.type}`;
-        }
-      })
-      .join("\n");
+    return screenshots;
   }
 
   private async analyzeWithGemini(
+    settings: import("../ai/mode-presets").ModePreset,
     timeline: string,
     screenshots: { ts: string; base64: string }[],
     transcript?: string
@@ -249,14 +213,12 @@ export class FlowDetectionEngine {
       { text: `\n\n## Activity Timeline\n\n${timeline}` },
     ];
 
-    // Add audio transcript if available
     if (transcript) {
       parts.push({
         text: `\n\n## Audio Transcript\n\nThe following is a transcript of audio captured during this session (system audio + microphone). Use this to understand verbal context — conversations, explanations, voice commands, meetings, video calls, etc.\n\n${transcript}`,
       });
     }
 
-    // Add screenshots as inline images
     if (screenshots.length > 0) {
       parts.push({ text: `\n\n## Screenshots (${screenshots.length} captured during this session)\n` });
       for (const ss of screenshots) {
@@ -267,18 +229,91 @@ export class FlowDetectionEngine {
       }
     }
 
+    console.log(`[Detection] Sending ${screenshots.length} screenshots to ${settings.detectionModel}${settings.thinking ? " (thinking)" : ""}`);
+
     const response = await this.genai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: settings.detectionModel,
       contents: [{ role: "user", parts }],
       config: {
         responseMimeType: "application/json",
+        ...(settings.thinking ? { thinkingConfig: { thinkingBudget: 8192 } } : {}),
       },
     });
 
     let text = response.text ?? "";
-    // Strip markdown fences if Gemini wraps the JSON
     text = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
-    // Remove control characters that break JSON.parse
+    text = text.replace(/[\x00-\x1f\x7f]/g, (ch) =>
+      ch === "\n" || ch === "\r" || ch === "\t" ? ch : ""
+    );
+    return JSON.parse(text) as GeminiAnalysis;
+  }
+
+  /** Split data into chunks that fit the model's context, analyze each, then synthesize */
+  private async analyzeChunked(
+    settings: import("../ai/mode-presets").ModePreset,
+    timeline: string,
+    screenshots: { ts: string; base64: string; time: number }[],
+    transcript?: string
+  ): Promise<GeminiAnalysis> {
+    const tpi = tokensPerImage(settings.resolution);
+    const textTokens = (timeline.length + (transcript?.length ?? 0) + DETECTION_PROMPT.length) / 4;
+    const maxImagesPerChunk = Math.floor((settings.contextLimit * 0.85 - textTokens) / tpi);
+    const chunkCount = Math.ceil(screenshots.length / maxImagesPerChunk);
+
+    console.log(`[Detection] Chunking: ${screenshots.length} screenshots into ${chunkCount} chunks (max ${maxImagesPerChunk} images/chunk)`);
+
+    // Split timeline by time ranges matching screenshot chunks
+    const chunkResults: GeminiAnalysis[] = [];
+
+    for (let i = 0; i < chunkCount; i++) {
+      const chunkScreenshots = screenshots.slice(i * maxImagesPerChunk, (i + 1) * maxImagesPerChunk);
+      console.log(`[Detection] Analyzing chunk ${i + 1}/${chunkCount} (${chunkScreenshots.length} screenshots)`);
+
+      const result = await this.analyzeWithGemini(
+        settings,
+        timeline, // full timeline is small after aggregation
+        chunkScreenshots,
+        transcript // full transcript is small
+      );
+      chunkResults.push(result);
+    }
+
+    // Synthesis pass: merge chunk results
+    if (chunkResults.length === 1) return chunkResults[0];
+
+    console.log(`[Detection] Synthesis pass: merging ${chunkResults.length} chunk results`);
+    return this.synthesizeChunks(settings, chunkResults);
+  }
+
+  private async synthesizeChunks(
+    settings: import("../ai/mode-presets").ModePreset,
+    chunks: GeminiAnalysis[]
+  ): Promise<GeminiAnalysis> {
+    const synthesisPrompt = `You are FlowMind. You received multiple analysis chunks from the same session. Merge and deduplicate them into a single coherent result.
+
+Rules:
+- If the same flow appears in multiple chunks, merge into one with combined details
+- Remove duplicates in knowledge fragments
+- Maintain the same JSON output format
+- Prefer higher-confidence classifications when merging
+
+Here are the chunk results:
+
+${chunks.map((c, i) => `### Chunk ${i + 1}\n${JSON.stringify(c, null, 2)}`).join("\n\n")}
+
+Respond with ONLY the merged JSON.`;
+
+    const response = await this.genai.models.generateContent({
+      model: settings.detectionModel,
+      contents: [{ role: "user", parts: [{ text: synthesisPrompt }] }],
+      config: {
+        responseMimeType: "application/json",
+        ...(settings.thinking ? { thinkingConfig: { thinkingBudget: 8192 } } : {}),
+      },
+    });
+
+    let text = response.text ?? "";
+    text = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
     text = text.replace(/[\x00-\x1f\x7f]/g, (ch) =>
       ch === "\n" || ch === "\r" || ch === "\t" ? ch : ""
     );

@@ -1,5 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { FlowStore } from "./flow-store";
+import { loadConfig } from "../config";
+import { getEffectiveSettings } from "../ai/mode-presets";
 import type { InterviewQuestion, FlowDocument } from "../types";
 
 const AUTOMATION_PROMPT = `You are FlowMind, an AI that generates automations from documented workflows.
@@ -27,6 +29,11 @@ export class InterviewEngine {
       throw new Error("GEMINI_API_KEY environment variable is required");
     }
     this.genai = new GoogleGenAI({ apiKey });
+  }
+
+  private async getAutomationModel(): Promise<string> {
+    const config = await loadConfig();
+    return getEffectiveSettings(config).automationModel;
   }
 
   async getQuestions(flowId: string): Promise<InterviewQuestion[]> {
@@ -130,7 +137,7 @@ export class InterviewEngine {
     }
 
     const response = await this.genai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: await this.getAutomationModel(),
       contents: [
         {
           role: "user",
@@ -186,7 +193,7 @@ export class InterviewEngine {
   ): Promise<boolean> {
     // Use Gemini to synthesize the partial flow + answers into a complete flow
     const response = await this.genai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: await this.getAutomationModel(),
       contents: [
         {
           role: "user",
