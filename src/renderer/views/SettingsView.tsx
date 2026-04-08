@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import type { FlowMode } from "../../config";
+
+type FlowMode = "economy" | "standard" | "pro" | "maximum";
 
 interface Settings {
   mode: FlowMode;
