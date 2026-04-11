@@ -1,15 +1,21 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, protocol, net } from "electron";
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, protocol, net, shell } from "electron";
 import path from "node:path";
 import dotenv from "dotenv";
 
-// Load .env from project root (not cwd, which changes in Electron Forge)
-dotenv.config({ path: path.join(app.getAppPath(), ".env") });
+// Load .env — in packaged builds, look next to the exe; in dev, use app path
+const envPath = app.isPackaged
+  ? path.join(path.dirname(app.getPath("exe")), ".env")
+  : path.join(app.getAppPath(), ".env");
+dotenv.config({ path: envPath });
 import { FlowDetectionEngine } from "./engine/flow-detection";
 import { FlowStore } from "./engine/flow-store";
 import { InterviewEngine } from "./engine/interview";
+import { DescribeEngine } from "./engine/describe";
+import { DescriptionStore } from "./engine/description-store";
 import { CaptureOrchestrator } from "./capture/orchestrator";
 import { CaptureStorage } from "./capture/storage";
-import { loadConfig, saveConfig, cleanupModeToMs, type AppConfig } from "./config";
+import { loadConfig, saveConfig, type AppConfig } from "./config";
+import { getEffectiveSettings } from "./ai/mode-presets";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -18,9 +24,12 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let flowEngine: FlowDetectionEngine;
 let flowStore: FlowStore;
+let descriptionStore: DescriptionStore;
+let describeEngine: DescribeEngine;
 let interviewEngine: InterviewEngine;
 let captureOrchestrator: CaptureOrchestrator;
-let detectionInterval: ReturnType<typeof setInterval> | null = null;
+let describeInterval: ReturnType<typeof setInterval> | null = null;
+let analyzeInterval: ReturnType<typeof setInterval> | null = null;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -76,8 +85,10 @@ function updateTrayMenu(): void {
       label: isCapturing ? "Stop Capture" : "Start Capture",
       click: async () => {
         if (isCapturing) {
+          const sessionDir = captureOrchestrator.getActiveSessionDir();
+          const sessionId = captureOrchestrator.getStats().sessionId;
           await captureOrchestrator.stop();
-          runDetection();
+          runPostCaptureSequence(sessionDir, sessionId);
         } else {
           await captureOrchestrator.start();
         }
@@ -104,7 +115,14 @@ function updateTrayMenu(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createEmpty();
+  // Create a simple 16x16 icon (Windows requires a non-empty tray icon)
+  const icon = nativeImage.createFromBuffer(
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMklEQVQ4T2NkYPj/n4EBCBgZGRkYQWwUwMjIyIiqAMVsJBcMehdQHAijYTAaBhSHAQBCfQgRsUb6MAAAAABJRU5ErkJggg==",
+      "base64"
+    ),
+    { width: 16, height: 16 }
+  );
   tray = new Tray(icon);
 
   updateTrayMenu();
@@ -115,6 +133,31 @@ function createTray(): void {
   });
 }
 
+/**
+ * Phase 1 — describe the most recent window of the active capture session.
+ * Safe to call at any time; no-ops if not capturing or describe engine is busy.
+ */
+async function runDescribe(): Promise<void> {
+  try {
+    if (!captureOrchestrator.isCapturing()) return;
+    if (describeEngine.isRunning()) return;
+
+    const sessionDir = captureOrchestrator.getActiveSessionDir();
+    if (!sessionDir) return;
+    const sessionId = captureOrchestrator.getStats().sessionId;
+    if (!sessionId) return;
+
+    await describeEngine.describeWindow(sessionDir, sessionId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Describe failed:", message);
+  }
+}
+
+/**
+ * Phase 2 — run flow detection over all unanalyzed descriptions.
+ * Pure text, fast, no screenshots sent.
+ */
 async function runDetection(): Promise<void> {
   try {
     mainWindow?.webContents.send("detection:status", "running");
@@ -122,7 +165,6 @@ async function runDetection(): Promise<void> {
     mainWindow?.webContents.send("detection:status", "idle");
     mainWindow?.webContents.send("detection:results", results);
 
-    // Run cleanup after successful detection
     await runCleanup();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -132,17 +174,69 @@ async function runDetection(): Promise<void> {
   }
 }
 
+/**
+ * Cleanup runs two independent passes:
+ *  1. Raw session cleanup — driven by cleanupMode
+ *  2. Description cleanup — driven by descriptionRetentionMinutes
+ */
 async function runCleanup(): Promise<void> {
   try {
     const config = await loadConfig();
-    const maxAgeMs = cleanupModeToMs(config.cleanupMode);
     const activeDir = captureOrchestrator.getActiveSessionDir();
-    const deleted = await CaptureStorage.cleanupAnalyzed(maxAgeMs, activeDir);
-    if (deleted > 0) {
-      console.log(`Cleanup: deleted ${deleted} analyzed sessions (mode: ${config.cleanupMode})`);
+
+    // --- Raw session cleanup ---
+    if (config.cleanupMode === "after-described") {
+      const deleted = await CaptureStorage.cleanupDescribed(activeDir);
+      if (deleted > 0) {
+        console.log(`Cleanup: deleted ${deleted} described sessions (mode: after-described)`);
+      }
+    } else {
+      const maxAgeMs = config.cleanupMode === "after-analysis"
+        ? 0
+        : config.cleanupMode === "1h"
+          ? 60 * 60 * 1000
+          : config.cleanupMode === "4h"
+            ? 4 * 60 * 60 * 1000
+            : Infinity;
+      if (maxAgeMs !== Infinity) {
+        const deleted = await CaptureStorage.cleanupAnalyzed(maxAgeMs, activeDir);
+        if (deleted > 0) {
+          console.log(`Cleanup: deleted ${deleted} analyzed sessions (mode: ${config.cleanupMode})`);
+        }
+      }
+    }
+
+    // --- Description cleanup (age-based, linked descriptions are always kept) ---
+    const settings = getEffectiveSettings(config);
+    const retentionMs = settings.descriptionRetentionMinutes * 60 * 1000;
+    const deletedDescs = await descriptionStore.cleanupOld(retentionMs);
+    if (deletedDescs > 0) {
+      console.log(`Cleanup: deleted ${deletedDescs} descriptions older than ${settings.descriptionRetentionMinutes} min (linked kept)`);
     }
   } catch (err) {
     console.error("Cleanup failed:", err);
+  }
+}
+
+/**
+ * Capture-stop sequence: final describe pass over any remaining window,
+ * then full phase-2 detection, then cleanup. Called from tray and IPC handlers.
+ */
+async function runPostCaptureSequence(sessionDir: string | null, sessionId: string | null): Promise<void> {
+  try {
+    if (sessionDir && sessionId) {
+      // Flush the tail window. Describe calls are queued serially, so this will run
+      // after any interval-triggered describe that's still in flight.
+      await describeEngine.describeWindow(sessionDir, sessionId).catch((err) => {
+        console.error("Final describe failed:", err);
+      });
+      // Double-safety: wait for any other queued describe calls to fully drain before detection.
+      await describeEngine.waitForIdle();
+      // Mark session as fully described so after-described cleanup can reclaim it.
+      await CaptureStorage.markDescribed([sessionDir]).catch(() => {});
+    }
+  } finally {
+    await runDetection();
   }
 }
 
@@ -158,6 +252,22 @@ function setupIPC(): void {
 
   ipcMain.handle("knowledge:getAll", async () => {
     return flowStore.getAllKnowledge();
+  });
+
+  // Descriptions (phase-1 artifacts)
+  ipcMain.handle("descriptions:getAll", async () => {
+    return descriptionStore.getAllDescriptions();
+  });
+
+  ipcMain.handle("descriptions:getByWindowStarts", async (_e, windowStarts: string[]) => {
+    if (!Array.isArray(windowStarts) || windowStarts.length === 0) return [];
+    const wanted = new Set(windowStarts);
+    const all = await descriptionStore.getAllDescriptions();
+    return all.filter((d) => wanted.has(d.frontmatter.windowStart));
+  });
+
+  ipcMain.handle("descriptions:getKeyScreenshots", async (_e, descriptionFilePath: string) => {
+    return descriptionStore.getKeyScreenshotPaths(descriptionFilePath);
   });
 
   // Detection controls
@@ -176,10 +286,12 @@ function setupIPC(): void {
   });
 
   ipcMain.handle("capture:stop", async () => {
+    const sessionDir = captureOrchestrator.getActiveSessionDir();
+    const sessionId = captureOrchestrator.getStats().sessionId;
     await captureOrchestrator.stop();
     updateTrayMenu();
-    // Auto-run detection after capture stops
-    runDetection();
+    // Final phase-1 flush + phase-2 detection
+    runPostCaptureSequence(sessionDir, sessionId);
   });
 
   ipcMain.handle("capture:getStats", () => {
@@ -234,14 +346,36 @@ function setupIPC(): void {
   });
 
   ipcMain.handle(
-    "interview:submitAnswer",
-    async (_e, flowId: string, questionIndex: number, answer: string) => {
-      return interviewEngine.submitAnswer(flowId, questionIndex, answer);
+    "interview:submitAllAnswers",
+    async (_e, flowId: string, answers: Record<number, string>) => {
+      return interviewEngine.submitAllAnswers(flowId, answers);
     }
   );
 
   ipcMain.handle("interview:generateAutomation", async (_e, flowId: string, format: string) => {
     return interviewEngine.generateAutomation(flowId, format);
+  });
+
+  // Automations — list, read, open, reveal, delete
+  ipcMain.handle("automations:listForFlow", async (_e, flowName: string) => {
+    return flowStore.listAutomationsForFlow(flowName);
+  });
+
+  ipcMain.handle("automations:readFile", async (_e, filePath: string) => {
+    return flowStore.readAutomation(filePath);
+  });
+
+  ipcMain.handle("automations:open", async (_e, filePath: string) => {
+    const err = await shell.openPath(filePath);
+    if (err) throw new Error(err);
+  });
+
+  ipcMain.handle("automations:revealInExplorer", async (_e, filePath: string) => {
+    shell.showItemInFolder(filePath);
+  });
+
+  ipcMain.handle("automations:delete", async (_e, filePath: string) => {
+    await flowStore.deleteAutomation(filePath);
   });
 
   // Settings
@@ -260,6 +394,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.whenReady().then(async () => {
+  try {
   // Handle flowmind:// protocol for serving local files
   protocol.handle("flowmind", async (request) => {
     // Convert flowmind://file/<encoded-path> to a local file path
@@ -274,7 +409,11 @@ app.whenReady().then(async () => {
   flowStore = new FlowStore();
   await flowStore.ensureDirectories();
 
-  flowEngine = new FlowDetectionEngine(flowStore);
+  descriptionStore = new DescriptionStore();
+  await descriptionStore.ensureDirectory();
+
+  describeEngine = new DescribeEngine(descriptionStore);
+  flowEngine = new FlowDetectionEngine(flowStore, descriptionStore);
   interviewEngine = new InterviewEngine(flowStore);
   captureOrchestrator = new CaptureOrchestrator();
 
@@ -287,13 +426,24 @@ app.whenReady().then(async () => {
   createTray();
   createWindow();
 
-  // Run detection at configured interval (default 15 min)
+  // Two-phase scheduling:
+  //  - describeInterval: frequent (default 1 min) — turns raw capture into text narratives
+  //  - analyzeInterval: less frequent (default 10 min) — turns narratives into flows
   const config = await loadConfig();
-  const intervalMs = config.detectionIntervalMinutes * 60 * 1000;
-  detectionInterval = setInterval(runDetection, intervalMs);
-  console.log(`[FlowMind] Detection interval: ${config.detectionIntervalMinutes} min`);
+  const describeMs = config.describeIntervalMinutes * 60 * 1000;
+  const analyzeMs = config.analyzeIntervalMinutes * 60 * 1000;
 
-  // Cleanup runs after each detection (in runDetection), no separate timer needed
+  describeInterval = setInterval(runDescribe, describeMs);
+  analyzeInterval = setInterval(runDetection, analyzeMs);
+
+  console.log(
+    `[FlowMind] Describe interval: ${config.describeIntervalMinutes} min, ` +
+    `Analyze interval: ${config.analyzeIntervalMinutes} min`
+  );
+  } catch (err) {
+    const { dialog } = require("electron");
+    dialog.showErrorBox("FlowMind startup error", String(err));
+  }
 });
 
 app.on("window-all-closed", () => {
@@ -307,7 +457,8 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", async () => {
-  if (detectionInterval) clearInterval(detectionInterval);
+  if (describeInterval) clearInterval(describeInterval);
+  if (analyzeInterval) clearInterval(analyzeInterval);
   await captureOrchestrator.stop();
   tray = null;
 });

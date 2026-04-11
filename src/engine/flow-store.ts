@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import type {
+  AutomationFile,
   FlowDocument,
   FlowFrontmatter,
   KnowledgeDocument,
@@ -10,6 +11,10 @@ import type {
 } from "../types";
 
 const BASE_DIR = path.join(os.homedir(), "flowtracker");
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 export class FlowStore {
   private baseDir: string;
@@ -63,10 +68,7 @@ export class FlowStore {
   ): Promise<string> {
     const subdir = type === "complete" ? "flows/complete" : "flows/partial";
     const date = new Date().toISOString().slice(0, 10);
-    const slug = frontmatter.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "");
+    const slug = this.slugify(frontmatter.name);
     const filename = `${date}-${slug}.md`;
     const filePath = path.join(this.baseDir, subdir, filename);
 
@@ -100,16 +102,123 @@ export class FlowStore {
     await fsp.writeFile(filePath, content, "utf-8");
   }
 
-  async saveAutomation(name: string, content: string, ext: string): Promise<string> {
-    const date = new Date().toISOString().slice(0, 10);
-    const slug = name
+  /**
+   * Save a generated automation file for a flow.
+   * Filename pattern: <flow-slug>-<format>.<ext>
+   * Exactly one file per (flow, format) pair. Regeneration overwrites.
+   * Also removes any legacy date-prefixed or counter-suffixed files from the
+   * old scheme so the list stays clean after upgrade.
+   */
+  async saveAutomation(
+    name: string,
+    content: string,
+    format: string,
+    ext: string
+  ): Promise<string> {
+    const slug = this.slugify(name);
+    const dir = path.join(this.baseDir, "automations");
+    await fsp.mkdir(dir, { recursive: true });
+
+    // Clean up any legacy files for this (flow, format) — old dated/counter names
+    try {
+      const existing = await fsp.readdir(dir);
+      const legacyPattern = new RegExp(
+        `^(?:\\d{4}-\\d{2}-\\d{2}-)?${escapeRegExp(slug)}-${escapeRegExp(format)}(?:-\\d+)?\\.[a-z0-9]+$`
+      );
+      for (const f of existing) {
+        if (legacyPattern.test(f)) {
+          await fsp.unlink(path.join(dir, f)).catch(() => {});
+        }
+      }
+    } catch { /* ignore */ }
+
+    const filename = `${slug}-${format}.${ext}`;
+    const filePath = path.join(dir, filename);
+    await fsp.writeFile(filePath, content, "utf-8");
+    return filePath;
+  }
+
+  /**
+   * List all automation files generated for a given flow name.
+   * Matches both the new scheme (<slug>-<format>.<ext>) and legacy dated/counter names.
+   * For each format, returns the newest file only.
+   */
+  async listAutomationsForFlow(flowName: string): Promise<AutomationFile[]> {
+    const dir = path.join(this.baseDir, "automations");
+    if (!fs.existsSync(dir)) return [];
+
+    const slug = this.slugify(flowName);
+    const files = await fsp.readdir(dir);
+    const byFormat = new Map<string, AutomationFile>();
+
+    // Match both new and legacy patterns:
+    //   New:    <slug>-<format>.<ext>
+    //   Legacy: <date>-<slug>-<format>(-N)?.<ext>
+    const pattern = new RegExp(
+      `^(?:\\d{4}-\\d{2}-\\d{2}-)?${escapeRegExp(slug)}-([a-z-]+?)(?:-\\d+)?\\.([a-z0-9]+)$`
+    );
+
+    for (const f of files) {
+      const m = f.match(pattern);
+      if (!m) continue;
+      const [, format, ext] = m;
+      const filePath = path.join(dir, f);
+      try {
+        const stat = await fsp.stat(filePath);
+        const entry: AutomationFile = {
+          filePath,
+          filename: f,
+          format,
+          ext,
+          createdAt: stat.mtime.toISOString(),
+          sizeBytes: stat.size,
+        };
+        const existing = byFormat.get(format);
+        if (!existing || new Date(entry.createdAt).getTime() > new Date(existing.createdAt).getTime()) {
+          byFormat.set(format, entry);
+        }
+      } catch { /* skip unreadable */ }
+    }
+
+    return Array.from(byFormat.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
+  async deleteAutomation(filePath: string): Promise<void> {
+    // Safety: only allow deleting files inside our automations directory
+    const automationsDir = path.join(this.baseDir, "automations");
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(automationsDir))) {
+      throw new Error("Refusing to delete file outside automations directory");
+    }
+    await fsp.unlink(resolved);
+  }
+
+  /**
+   * Predict the final absolute path `saveAutomation` will use for a given
+   * (flow, format, ext). Used by callers that need to embed the path inside
+   * the file content before saving.
+   */
+  predictAutomationPath(name: string, format: string, ext: string): string {
+    const slug = this.slugify(name);
+    return path.join(this.baseDir, "automations", `${slug}-${format}.${ext}`);
+  }
+
+  async readAutomation(filePath: string): Promise<string> {
+    const automationsDir = path.join(this.baseDir, "automations");
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(automationsDir))) {
+      throw new Error("Refusing to read file outside automations directory");
+    }
+    return fsp.readFile(resolved, "utf-8");
+  }
+
+  private slugify(name: string): string {
+    return name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "");
-    const filename = `${date}-${slug}.${ext}`;
-    const filePath = path.join(this.baseDir, "automations", filename);
-    await fsp.writeFile(filePath, content, "utf-8");
-    return filePath;
   }
 
   async saveSummary(summary: string): Promise<void> {

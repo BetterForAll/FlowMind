@@ -6,6 +6,13 @@ const api = {
   getFlowById: (id: string) => ipcRenderer.invoke("flows:getById", id),
   getAllKnowledge: () => ipcRenderer.invoke("knowledge:getAll"),
 
+  // Descriptions (phase-1 artifacts)
+  getAllDescriptions: () => ipcRenderer.invoke("descriptions:getAll"),
+  getDescriptionsByWindowStarts: (windowStarts: string[]) =>
+    ipcRenderer.invoke("descriptions:getByWindowStarts", windowStarts),
+  getDescriptionKeyScreenshots: (descriptionFilePath: string) =>
+    ipcRenderer.invoke("descriptions:getKeyScreenshots", descriptionFilePath),
+
   // Detection
   runDetection: () => ipcRenderer.invoke("detection:runNow"),
   getDetectionStatus: () => ipcRenderer.invoke("detection:getStatus"),
@@ -28,10 +35,22 @@ const api = {
   // Interview
   getQuestions: (flowId: string) =>
     ipcRenderer.invoke("interview:getQuestions", flowId),
-  submitAnswer: (flowId: string, questionIndex: number, answer: string) =>
-    ipcRenderer.invoke("interview:submitAnswer", flowId, questionIndex, answer),
+  submitAllAnswers: (flowId: string, answers: Record<number, string>) =>
+    ipcRenderer.invoke("interview:submitAllAnswers", flowId, answers),
   generateAutomation: (flowId: string, format: string) =>
     ipcRenderer.invoke("interview:generateAutomation", flowId, format),
+
+  // Automations
+  listAutomationsForFlow: (flowName: string) =>
+    ipcRenderer.invoke("automations:listForFlow", flowName),
+  readAutomation: (filePath: string) =>
+    ipcRenderer.invoke("automations:readFile", filePath),
+  openAutomation: (filePath: string) =>
+    ipcRenderer.invoke("automations:open", filePath),
+  revealAutomation: (filePath: string) =>
+    ipcRenderer.invoke("automations:revealInExplorer", filePath),
+  deleteAutomation: (filePath: string) =>
+    ipcRenderer.invoke("automations:delete", filePath),
 
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:get"),

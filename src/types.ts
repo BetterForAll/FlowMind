@@ -12,6 +12,8 @@ export interface FlowFrontmatter {
   trigger?: string;
   gaps?: number;
   apps: string[];
+  /** ISO windowStart timestamps of descriptions that contributed to this flow. */
+  source_windows?: string[];
 }
 
 export interface KnowledgeFrontmatter {
@@ -47,6 +49,15 @@ export interface InterviewQuestion {
   question: string;
   answered: boolean;
   answer?: string;
+}
+
+export interface AutomationFile {
+  filePath: string;
+  filename: string;
+  format: string;    // "python" | "nodejs" | "claude-skill" | "tutorial"
+  ext: string;       // "py" | "js" | "md"
+  createdAt: string; // ISO
+  sizeBytes: number;
 }
 
 export interface DashboardData {

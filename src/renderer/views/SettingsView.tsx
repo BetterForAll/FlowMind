@@ -5,10 +5,14 @@ type FlowMode = "economy" | "standard" | "pro" | "maximum";
 interface Settings {
   mode: FlowMode;
   cleanupMode: string;
-  detectionIntervalMinutes: number;
+  describeIntervalMinutes: number;
+  analyzeIntervalMinutes: number;
+  descriptionRetentionMinutes: number | null;
+  detectionIntervalMinutes: number; // legacy
   screenshotIntervalMs: number;
   thinking: boolean;
   showRawData: boolean;
+  audioEnabledByDefault: boolean;
   transcriptionModel: string | null;
   detectionModel: string | null;
   automationModel: string | null;
@@ -59,7 +63,8 @@ const RESOLUTION_OPTIONS = [
 ];
 
 const CLEANUP_OPTIONS = [
-  { value: "after-analysis", label: "Delete after each analysis" },
+  { value: "after-described", label: "Delete once described (text saved, reclaim disk fastest)" },
+  { value: "after-analysis", label: "Delete after full analysis" },
   { value: "1h", label: "Keep for 1 hour" },
   { value: "4h", label: "Keep for 4 hours" },
   { value: "manual", label: "Manual cleanup only" },
@@ -202,19 +207,38 @@ export function SettingsView() {
       <div className="settings-section">
         <h2 className="settings-heading">Analysis Frequency</h2>
         <p className="settings-desc">
-          How often FlowMind analyzes captured data to detect workflows.
+          FlowMind runs in two phases: Describe (turns screen activity into text)
+          runs frequently during capture; Analyze (detects flows from those
+          descriptions) runs on a longer interval.
         </p>
-        <select
-          className="settings-select"
-          value={settings.detectionIntervalMinutes}
-          onChange={(e) => update({ detectionIntervalMinutes: parseInt(e.target.value) })}
-        >
-          <option value={5}>Every 5 minutes</option>
-          <option value={10}>Every 10 minutes</option>
-          <option value={15}>Every 15 minutes</option>
-          <option value={30}>Every 30 minutes</option>
-          <option value={60}>Every 60 minutes</option>
-        </select>
+        <div className="settings-grid">
+          <label className="settings-label">
+            Describe interval
+            <select
+              className="settings-select"
+              value={settings.describeIntervalMinutes}
+              onChange={(e) => update({ describeIntervalMinutes: parseInt(e.target.value) })}
+            >
+              <option value={1}>Every 1 minute</option>
+              <option value={2}>Every 2 minutes</option>
+              <option value={5}>Every 5 minutes</option>
+            </select>
+          </label>
+          <label className="settings-label">
+            Analyze interval
+            <select
+              className="settings-select"
+              value={settings.analyzeIntervalMinutes}
+              onChange={(e) => update({ analyzeIntervalMinutes: parseInt(e.target.value) })}
+            >
+              <option value={5}>Every 5 minutes</option>
+              <option value={10}>Every 10 minutes</option>
+              <option value={15}>Every 15 minutes</option>
+              <option value={30}>Every 30 minutes</option>
+              <option value={60}>Every 60 minutes</option>
+            </select>
+          </label>
+        </div>
       </div>
 
       {/* Screenshot Settings */}
@@ -268,9 +292,10 @@ export function SettingsView() {
 
       {/* Data Cleanup */}
       <div className="settings-section">
-        <h2 className="settings-heading">Data Cleanup</h2>
+        <h2 className="settings-heading">Raw Data Cleanup</h2>
         <p className="settings-desc">
-          How long to keep raw capture data (screenshots, events, audio) after analysis.
+          How long to keep raw capture data (screenshots, events, audio). Text descriptions
+          are preserved separately below.
         </p>
         <div className="settings-options">
           {CLEANUP_OPTIONS.map((opt) => (
@@ -286,6 +311,32 @@ export function SettingsView() {
             </label>
           ))}
         </div>
+      </div>
+
+      {/* Description Retention */}
+      <div className="settings-section">
+        <h2 className="settings-heading">Description Retention</h2>
+        <p className="settings-desc">
+          How long to keep phase-1 text descriptions. Descriptions linked to a detected flow
+          are always kept regardless of this setting.
+        </p>
+        <select
+          className="settings-select"
+          value={settings.descriptionRetentionMinutes ?? "default"}
+          onChange={(e) => {
+            const v = e.target.value;
+            update({ descriptionRetentionMinutes: v === "default" ? null : parseInt(v, 10) });
+          }}
+        >
+          <option value="default">Use mode default (economy: 1d, standard: 3d, pro: 7d, max: 14d)</option>
+          <option value={60}>1 hour</option>
+          <option value={6 * 60}>6 hours</option>
+          <option value={24 * 60}>1 day</option>
+          <option value={3 * 24 * 60}>3 days</option>
+          <option value={7 * 24 * 60}>7 days</option>
+          <option value={14 * 24 * 60}>14 days</option>
+          <option value={30 * 24 * 60}>30 days</option>
+        </select>
       </div>
 
       {/* API Key */}
@@ -311,6 +362,23 @@ export function SettingsView() {
             {showApiKey ? "Hide" : "Show"}
           </button>
         </div>
+      </div>
+
+      {/* Audio Capture */}
+      <div className="settings-section">
+        <h2 className="settings-heading">Audio Capture</h2>
+        <p className="settings-desc">
+          Record system audio and microphone during capture. Irrelevant background conversations
+          are automatically filtered out of descriptions.
+        </p>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={settings.audioEnabledByDefault}
+            onChange={(e) => update({ audioEnabledByDefault: e.target.checked })}
+          />
+          <span>Enable audio capture by default</span>
+        </label>
       </div>
 
       {/* Developer Options */}

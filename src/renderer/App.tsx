@@ -3,10 +3,11 @@ import { Dashboard } from "./views/Dashboard";
 import { FlowDetail } from "./views/FlowDetail";
 import { KnowledgeView } from "./views/KnowledgeView";
 import { RawDataView } from "./views/RawDataView";
+import { DescriptionsView } from "./views/DescriptionsView";
 import { SettingsView } from "./views/SettingsView";
 import type { FlowDocument, KnowledgeDocument, CaptureStats } from "../types";
 
-type View = "dashboard" | "flow-detail" | "knowledge" | "raw-data" | "settings";
+type View = "dashboard" | "flow-detail" | "knowledge" | "descriptions" | "raw-data" | "settings";
 
 export function App() {
   const [view, setView] = useState<View>("dashboard");
@@ -89,6 +90,12 @@ export function App() {
           >
             Knowledge
           </button>
+          <button
+            className={`nav-item ${view === "descriptions" ? "active" : ""}`}
+            onClick={() => setView("descriptions")}
+          >
+            Descriptions
+          </button>
           {showRawData && (
             <button
               className={`nav-item ${view === "raw-data" ? "active" : ""}`}
@@ -139,6 +146,9 @@ export function App() {
         )}
         {view === "knowledge" && (
           <KnowledgeView knowledge={knowledge} />
+        )}
+        {view === "descriptions" && (
+          <DescriptionsView />
         )}
         {view === "raw-data" && (
           <RawDataView />
