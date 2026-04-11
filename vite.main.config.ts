@@ -7,7 +7,7 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      external: ["bufferutil", "utf-8-validate", "uiohook-napi"],
+      external: ["bufferutil", "utf-8-validate", "uiohook-napi", "dotenv"],
     },
   },
 });
