@@ -1,24 +1,22 @@
 import { GoogleGenAI } from "@google/genai";
 import { v4 as uuid } from "uuid";
 import fsp from "node:fs/promises";
-import fs from "node:fs";
 import path from "node:path";
 import { FlowStore } from "./flow-store";
-import { AudioTranscriber } from "./audio-transcription";
-import { aggregateEvents } from "./event-aggregator";
-import { CaptureStorage } from "../capture/storage";
+import { DescriptionStore, type DescriptionDocument } from "./description-store";
 import { loadConfig } from "../config";
-import { getEffectiveSettings, tokensPerImage, fitsInOneCall } from "../ai/mode-presets";
+import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
   DetectionResult,
   FlowFrontmatter,
   KnowledgeFrontmatter,
-  CaptureEvent,
 } from "../types";
 
-const DETECTION_PROMPT = `You are FlowMind, an AI that analyzes screen activity data to detect repeated workflows, behavioral patterns, and decision-making knowledge.
+const DETECTION_PROMPT = `You are FlowMind, an AI that analyzes detailed narrative descriptions of user activity to detect repeated workflows, behavioral patterns, and decision-making knowledge.
 
-Analyze the following user activity timeline and produce a JSON response with detected flows and knowledge.
+You will receive a series of short narrative descriptions (each covering roughly one minute of activity), concatenated in chronological order. Read them together as one continuous story and detect patterns across the whole span.
+
+Produce a JSON response with detected flows and knowledge.
 
 CLASSIFICATION CRITERIA — follow these strictly:
 
@@ -42,11 +40,16 @@ KNOWLEDGE FRAGMENT — use for everything else:
 IMPORTANT:
 - Do NOT mark a flow as "complete" if you are guessing or hedging any steps
 - A single activity (watching a video, checking email) is a knowledge fragment, NOT a flow
-- Be SPECIFIC — reference actual app names, window titles, and actions observed
+- Be SPECIFIC — reference actual app names, window titles, and actions mentioned in the narratives
 - Never include sensitive data (passwords, tokens, personal message content)
-- When audio transcript is available, use it to understand VERBAL context: conversations, spoken explanations, voice commands, meetings, video calls
-- Correlate spoken context with visual activity
-- If the activity is mostly idle or has no meaningful patterns, return empty arrays
+- A single flow may span multiple narrative windows — stitch them together when they continue naturally
+- MERGE adjacent windows: when the same activity spans two or more consecutive windows (e.g., an action started in window N and finished in window N+1), treat it as ONE flow, not multiple. Never emit two flows that describe the same underlying activity.
+- COMPREHENSIVE DETECTION: when the narratives describe a multi-step task that ends in a concrete outcome (a file saved, a message sent, a form submitted), include ALL steps from the triggering action through the outcome in a SINGLE flow. Do NOT truncate the flow at a familiar sub-sequence (e.g., "searching Wikipedia") and ignore later steps (e.g., "copying the content and saving it to a notes file"). The flow should cover the full task the user was trying to accomplish.
+- EXCLUDE the FlowMind app itself from flow detection. FlowMind is the observer — do NOT include "the user opened FlowMind", "clicked Start Capture", "stopped Capture", "viewed the Dashboard", or any interaction with the FlowMind Electron app as a step in a flow or as a knowledge fragment. If the ONLY activity in a window was FlowMind itself, return nothing for that window. You MAY still mention FlowMind usage in descriptions, but the flow detector must treat it as invisible.
+- Some windows include "key visual frames" — screenshots the describe phase preserved because the text alone was insufficient. Use those images to verify exact button labels, error messages, UI state, and specific content that the narrative may have summarized.
+- If the narratives describe mostly idle or no meaningful patterns, return empty arrays
+
+SOURCE WINDOWS — for each flow and each knowledge fragment, list the EXACT windowStart timestamps (copied character-for-character from the "## Window <start> → <end>" headers in the input) that contributed to it. This is a derivative of the work you just did, not a separate task — just cite the windows you used. Include every window that provided evidence. If a knowledge fragment came from one window, that's fine — list just that one.
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -61,7 +64,8 @@ Respond with ONLY valid JSON in this exact format:
       "decision_logic": "Markdown section describing decision conditions",
       "tools_and_data": "Markdown section describing tool usage",
       "automation_classification": "Markdown section classifying step types",
-      "variations": "Markdown section noting variations"
+      "variations": "Markdown section noting variations",
+      "source_windows": ["<windowStart ISO>", "..."]
     }
   ],
   "partial_flows": [
@@ -71,7 +75,8 @@ Respond with ONLY valid JSON in this exact format:
       "apps": ["app1"],
       "observed_steps": "Markdown with observed steps, [GAP] markers",
       "questions": ["Q1: specific question", "Q2: specific question"],
-      "best_guess": "What you think the complete flow looks like"
+      "best_guess": "What you think the complete flow looks like",
+      "source_windows": ["<windowStart ISO>", "..."]
     }
   ],
   "knowledge": [
@@ -81,26 +86,27 @@ Respond with ONLY valid JSON in this exact format:
       "apps": ["app1"],
       "observation": "What was observed",
       "significance": "Why this matters for automation",
-      "related_flows": ["flow name if related"]
+      "related_flows": ["flow name if related"],
+      "source_windows": ["<windowStart ISO>", "..."]
     }
   ]
 }`;
 
 export class FlowDetectionEngine {
   private store: FlowStore;
+  private descriptionStore: DescriptionStore;
   private genai: GoogleGenAI;
-  private transcriber: AudioTranscriber;
   private running = false;
 
-  constructor(store: FlowStore) {
+  constructor(store: FlowStore, descriptionStore: DescriptionStore) {
     this.store = store;
+    this.descriptionStore = descriptionStore;
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error("GEMINI_API_KEY environment variable is required");
     }
     this.genai = new GoogleGenAI({ apiKey });
-    this.transcriber = new AudioTranscriber(this.genai);
   }
 
   isRunning(): boolean {
@@ -111,47 +117,51 @@ export class FlowDetectionEngine {
     if (this.running) {
       throw new Error("Detection already in progress");
     }
-
     this.running = true;
+
     try {
       const config = await loadConfig();
       const settings = getEffectiveSettings(config);
-
-      // 1. Gather data from recent sessions (based on analysis interval)
-      const intervalMs = config.detectionIntervalMinutes * 60 * 1000;
-      const since = new Date(Date.now() - intervalMs);
-      const sessionDirs = await CaptureStorage.getRecentSessionDirs(since);
 
       const emptyResult: DetectionResult = {
         newComplete: 0, updatedComplete: 0, newPartial: 0, newKnowledge: 0, filesWritten: [],
       };
 
-      if (sessionDirs.length === 0) return emptyResult;
+      // 1. Load unanalyzed descriptions
+      const descriptions = await this.descriptionStore.getUnanalyzedDescriptions();
+      if (descriptions.length === 0) {
+        console.log(`[Detection] No unanalyzed descriptions — skipping`);
+        return emptyResult;
+      }
 
-      // 2. Load and aggregate events
-      const events = await this.loadEvents(sessionDirs);
-      if (events.length === 0) return emptyResult;
-      const timeline = aggregateEvents(events);
-      console.log(`[Detection] Aggregated ${events.length} events into ${timeline.split("\n").length} lines`);
+      console.log(`[Detection] Analyzing ${descriptions.length} descriptions`);
 
-      // 3. Transcribe audio files
-      const transcript = await this.transcriber.transcribeSessions(sessionDirs, settings.transcriptionModel);
+      // 2. Build interleaved multimodal parts: each window's narrative followed by
+      //    its key screenshots (if any), in chronological order.
+      const windowParts = await this.buildWindowParts(descriptions);
+      const totalKeyFrames = windowParts.reduce((sum, w) => sum + w.keyScreenshots.length, 0);
+      console.log(`[Detection] Including ${totalKeyFrames} key screenshots across ${descriptions.length} windows`);
 
-      // 4. Load ALL screenshots
-      const screenshots = await this.loadAllScreenshots(sessionDirs);
-      console.log(`[Detection] Loaded ${screenshots.length} screenshots`);
+      // 3. Single Gemini call (text + key screenshots only)
+      const analysis = await this.analyzeWithGemini(settings.detectionModel, windowParts, settings.thinking);
 
-      // 5. Analyze — chunk if needed
-      const textTokens = (timeline.length + (transcript?.length ?? 0) + DETECTION_PROMPT.length) / 4; // rough estimate
-      const analysis = fitsInOneCall(screenshots.length, settings.resolution, textTokens, settings.contextLimit)
-        ? await this.analyzeWithGemini(settings, timeline, screenshots, transcript)
-        : await this.analyzeChunked(settings, timeline, screenshots, transcript);
+      // 4. Save results (flows + knowledge), filtering source_windows to only real citations
+      const validWindowStarts = new Set(descriptions.map((d) => d.frontmatter.windowStart));
+      const result = await this.saveResults(analysis, validWindowStarts);
 
-      // 6. Save results
-      const result = await this.saveResults(analysis);
+      // 5. Mark descriptions as analyzed
+      await this.descriptionStore.markAnalyzed(descriptions.map((d) => d.filePath));
 
-      // 7. Mark sessions as analyzed
-      await CaptureStorage.markAnalyzed(sessionDirs);
+      // 6. Link contributing descriptions so they survive age-based cleanup
+      const cited = new Set<string>();
+      for (const f of analysis.complete_flows ?? []) (f.source_windows ?? []).forEach((w) => cited.add(w));
+      for (const f of analysis.partial_flows ?? []) (f.source_windows ?? []).forEach((w) => cited.add(w));
+      for (const k of analysis.knowledge ?? []) (k.source_windows ?? []).forEach((w) => cited.add(w));
+      const realCitations = Array.from(cited).filter((w) => validWindowStarts.has(w));
+      if (realCitations.length > 0) {
+        const linked = await this.descriptionStore.markLinked(realCitations);
+        console.log(`[Detection] Linked ${linked} descriptions to detected flows/knowledge`);
+      }
 
       return result;
     } finally {
@@ -159,86 +169,88 @@ export class FlowDetectionEngine {
     }
   }
 
-  private async loadEvents(sessionDirs: string[]): Promise<CaptureEvent[]> {
-    const allEvents: CaptureEvent[] = [];
-    for (const dir of sessionDirs) {
-      const eventsFile = path.join(dir, "events.jsonl");
-      if (!fs.existsSync(eventsFile)) continue;
-      const content = await fsp.readFile(eventsFile, "utf-8");
-      for (const line of content.split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          allEvents.push(JSON.parse(line) as CaptureEvent);
-        } catch { /* skip malformed lines */ }
-      }
-    }
-    return allEvents.sort(
-      (a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime()
-    );
-  }
+  /**
+   * Build interleaved parts, one chunk per description window:
+   *   [ narrative header+body, then base64 of each key screenshot with its timestamp ]
+   */
+  private async buildWindowParts(
+    descriptions: DescriptionDocument[]
+  ): Promise<{
+    header: string;
+    body: string;
+    keyScreenshots: { ts: string; base64: string }[];
+  }[]> {
+    const result: {
+      header: string;
+      body: string;
+      keyScreenshots: { ts: string; base64: string }[];
+    }[] = [];
 
-  private async loadAllScreenshots(
-    sessionDirs: string[]
-  ): Promise<{ ts: string; base64: string; time: number }[]> {
-    const screenshots: { ts: string; base64: string; time: number }[] = [];
-    for (const dir of sessionDirs) {
-      const ssDir = path.join(dir, "screenshots");
-      if (!fs.existsSync(ssDir)) continue;
-      const files = await fsp.readdir(ssDir);
-      for (const file of files) {
-        if (!file.endsWith(".jpg")) continue;
-        const time = parseInt(file.replace(".jpg", ""), 10);
-        if (isNaN(time)) continue;
-        const filePath = path.join(ssDir, file);
-        const buffer = await fsp.readFile(filePath);
-        screenshots.push({
-          ts: new Date(time).toISOString(),
-          base64: buffer.toString("base64"),
-          time,
-        });
+    for (const d of descriptions) {
+      const header = `## Window ${d.frontmatter.windowStart} → ${d.frontmatter.windowEnd}`;
+      const keyPaths = await this.descriptionStore.getKeyScreenshotPaths(d.filePath);
+      const keyScreenshots: { ts: string; base64: string }[] = [];
+      for (const p of keyPaths) {
+        try {
+          const buf = await fsp.readFile(p);
+          const ms = parseInt(path.basename(p).replace(".jpg", ""), 10);
+          const ts = isNaN(ms) ? path.basename(p) : new Date(ms).toISOString();
+          keyScreenshots.push({ ts, base64: buf.toString("base64") });
+        } catch { /* skip unreadable */ }
       }
+      result.push({ header, body: d.body, keyScreenshots });
     }
-    screenshots.sort((a, b) => a.time - b.time);
-    return screenshots;
+    return result;
   }
 
   private async analyzeWithGemini(
-    settings: import("../ai/mode-presets").ModePreset,
-    timeline: string,
-    screenshots: { ts: string; base64: string }[],
-    transcript?: string
+    model: string,
+    windows: {
+      header: string;
+      body: string;
+      keyScreenshots: { ts: string; base64: string }[];
+    }[],
+    thinking: boolean
   ): Promise<GeminiAnalysis> {
     const parts: { text?: string; inlineData?: { mimeType: string; data: string } }[] = [
       { text: DETECTION_PROMPT },
-      { text: `\n\n## Activity Timeline\n\n${timeline}` },
+      { text: `\n\n## Activity Narratives\n\n` },
     ];
 
-    if (transcript) {
-      parts.push({
-        text: `\n\n## Audio Transcript\n\nThe following is a transcript of audio captured during this session (system audio + microphone). Use this to understand verbal context — conversations, explanations, voice commands, meetings, video calls, etc.\n\n${transcript}`,
-      });
-    }
-
-    if (screenshots.length > 0) {
-      parts.push({ text: `\n\n## Screenshots (${screenshots.length} captured during this session)\n` });
-      for (const ss of screenshots) {
-        parts.push({ text: `\n### Screenshot at ${ss.ts}\n` });
-        parts.push({
-          inlineData: { mimeType: "image/jpeg", data: ss.base64 },
-        });
+    for (const w of windows) {
+      parts.push({ text: `\n\n${w.header}\n\n${w.body}\n` });
+      if (w.keyScreenshots.length > 0) {
+        parts.push({ text: `\n### Key visual frames for this window\n` });
+        for (const ks of w.keyScreenshots) {
+          parts.push({ text: `\n**${ks.ts}**\n` });
+          parts.push({ inlineData: { mimeType: "image/jpeg", data: ks.base64 } });
+        }
       }
     }
 
-    console.log(`[Detection] Sending ${screenshots.length} screenshots to ${settings.detectionModel}${settings.thinking ? " (thinking)" : ""}`);
+    const totalText = windows.reduce((s, w) => s + w.body.length + w.header.length, 0);
+    const totalImages = windows.reduce((s, w) => s + w.keyScreenshots.length, 0);
+    console.log(`[Detection] Sending ${totalText} chars + ${totalImages} key frames to ${model}${thinking ? " (thinking)" : ""}`);
 
-    const response = await this.genai.models.generateContent({
-      model: settings.detectionModel,
+    const apiCall = this.genai.models.generateContent({
+      model,
       contents: [{ role: "user", parts }],
       config: {
         responseMimeType: "application/json",
-        ...(settings.thinking ? { thinkingConfig: { thinkingBudget: 8192 } } : {}),
+        ...(thinking ? { thinkingConfig: { thinkingBudget: 8192 } } : {}),
       },
     });
+
+    const response = await Promise.race([
+      apiCall,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Gemini detection timed out after 120s`)),
+          120_000
+        )
+      ),
+    ]);
+    console.log(`[Detection] Gemini response received`);
 
     let text = response.text ?? "";
     text = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
@@ -248,79 +260,13 @@ export class FlowDetectionEngine {
     return JSON.parse(text) as GeminiAnalysis;
   }
 
-  /** Split data into chunks that fit the model's context, analyze each, then synthesize */
-  private async analyzeChunked(
-    settings: import("../ai/mode-presets").ModePreset,
-    timeline: string,
-    screenshots: { ts: string; base64: string; time: number }[],
-    transcript?: string
-  ): Promise<GeminiAnalysis> {
-    const tpi = tokensPerImage(settings.resolution);
-    const textTokens = (timeline.length + (transcript?.length ?? 0) + DETECTION_PROMPT.length) / 4;
-    const maxImagesPerChunk = Math.floor((settings.contextLimit * 0.85 - textTokens) / tpi);
-    const chunkCount = Math.ceil(screenshots.length / maxImagesPerChunk);
+  private async saveResults(
+    analysis: GeminiAnalysis,
+    validWindowStarts: Set<string>
+  ): Promise<DetectionResult> {
+    const filterCitations = (ws?: string[]): string[] =>
+      (ws ?? []).filter((w) => validWindowStarts.has(w));
 
-    console.log(`[Detection] Chunking: ${screenshots.length} screenshots into ${chunkCount} chunks (max ${maxImagesPerChunk} images/chunk)`);
-
-    // Split timeline by time ranges matching screenshot chunks
-    const chunkResults: GeminiAnalysis[] = [];
-
-    for (let i = 0; i < chunkCount; i++) {
-      const chunkScreenshots = screenshots.slice(i * maxImagesPerChunk, (i + 1) * maxImagesPerChunk);
-      console.log(`[Detection] Analyzing chunk ${i + 1}/${chunkCount} (${chunkScreenshots.length} screenshots)`);
-
-      const result = await this.analyzeWithGemini(
-        settings,
-        timeline, // full timeline is small after aggregation
-        chunkScreenshots,
-        transcript // full transcript is small
-      );
-      chunkResults.push(result);
-    }
-
-    // Synthesis pass: merge chunk results
-    if (chunkResults.length === 1) return chunkResults[0];
-
-    console.log(`[Detection] Synthesis pass: merging ${chunkResults.length} chunk results`);
-    return this.synthesizeChunks(settings, chunkResults);
-  }
-
-  private async synthesizeChunks(
-    settings: import("../ai/mode-presets").ModePreset,
-    chunks: GeminiAnalysis[]
-  ): Promise<GeminiAnalysis> {
-    const synthesisPrompt = `You are FlowMind. You received multiple analysis chunks from the same session. Merge and deduplicate them into a single coherent result.
-
-Rules:
-- If the same flow appears in multiple chunks, merge into one with combined details
-- Remove duplicates in knowledge fragments
-- Maintain the same JSON output format
-- Prefer higher-confidence classifications when merging
-
-Here are the chunk results:
-
-${chunks.map((c, i) => `### Chunk ${i + 1}\n${JSON.stringify(c, null, 2)}`).join("\n\n")}
-
-Respond with ONLY the merged JSON.`;
-
-    const response = await this.genai.models.generateContent({
-      model: settings.detectionModel,
-      contents: [{ role: "user", parts: [{ text: synthesisPrompt }] }],
-      config: {
-        responseMimeType: "application/json",
-        ...(settings.thinking ? { thinkingConfig: { thinkingBudget: 8192 } } : {}),
-      },
-    });
-
-    let text = response.text ?? "";
-    text = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
-    text = text.replace(/[\x00-\x1f\x7f]/g, (ch) =>
-      ch === "\n" || ch === "\r" || ch === "\t" ? ch : ""
-    );
-    return JSON.parse(text) as GeminiAnalysis;
-  }
-
-  private async saveResults(analysis: GeminiAnalysis): Promise<DetectionResult> {
     const result: DetectionResult = {
       newComplete: 0,
       updatedComplete: 0,
@@ -331,7 +277,6 @@ Respond with ONLY the merged JSON.`;
 
     const now = new Date().toISOString();
 
-    // Save complete flows
     for (const flow of analysis.complete_flows ?? []) {
       const frontmatter: FlowFrontmatter = {
         type: "complete-flow",
@@ -344,6 +289,7 @@ Respond with ONLY the merged JSON.`;
         avg_duration: flow.avg_duration_minutes,
         trigger: flow.trigger,
         apps: flow.apps,
+        source_windows: filterCitations(flow.source_windows),
       };
 
       const body = `# ${flow.name}
@@ -371,7 +317,6 @@ ${flow.variations}`;
       result.filesWritten.push(filePath);
     }
 
-    // Save partial flows
     for (const flow of analysis.partial_flows ?? []) {
       const frontmatter: FlowFrontmatter = {
         type: "partial-flow",
@@ -383,6 +328,7 @@ ${flow.variations}`;
         confidence: flow.confidence as "low" | "medium",
         gaps: (flow.observed_steps.match(/\[GAP\]/g) ?? []).length,
         apps: flow.apps,
+        source_windows: filterCitations(flow.source_windows),
       };
 
       const body = `# ${flow.name} (Partial)
@@ -401,7 +347,6 @@ ${flow.best_guess}`;
       result.filesWritten.push(filePath);
     }
 
-    // Save knowledge fragments
     for (const k of analysis.knowledge ?? []) {
       const frontmatter: KnowledgeFrontmatter = {
         type: "knowledge",
@@ -427,9 +372,7 @@ ${k.related_flows.map((r) => `- ${r}`).join("\n") || "- None yet"}`;
       result.filesWritten.push(filePath);
     }
 
-    // Save run summary
     const summary = `# FlowMind Run — ${now}
-- Analyzed: last 60 minutes
 - Complete flows detected: ${result.newComplete} (new: ${result.newComplete}, updated: ${result.updatedComplete})
 - Partial flows detected: ${result.newPartial}
 - Knowledge fragments: ${result.newKnowledge}
@@ -441,7 +384,6 @@ ${k.related_flows.map((r) => `- ${r}`).join("\n") || "- None yet"}`;
   }
 }
 
-// Internal types for Gemini response
 interface GeminiAnalysis {
   complete_flows?: {
     name: string;
@@ -454,6 +396,7 @@ interface GeminiAnalysis {
     tools_and_data: string;
     automation_classification: string;
     variations: string;
+    source_windows?: string[];
   }[];
   partial_flows?: {
     name: string;
@@ -462,6 +405,7 @@ interface GeminiAnalysis {
     observed_steps: string;
     questions: string[];
     best_guess: string;
+    source_windows?: string[];
   }[];
   knowledge?: {
     title: string;
@@ -470,5 +414,6 @@ interface GeminiAnalysis {
     observation: string;
     significance: string;
     related_flows: string[];
+    source_windows?: string[];
   }[];
 }

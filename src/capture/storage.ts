@@ -213,6 +213,13 @@ export class CaptureStorage {
     }
   }
 
+  /** Mark session(s) as fully described by phase 1. Used by the new two-phase pipeline. */
+  static async markDescribed(sessionPaths: string[]): Promise<void> {
+    for (const sp of sessionPaths) {
+      await fsp.writeFile(path.join(sp, ".described"), new Date().toISOString(), "utf-8");
+    }
+  }
+
   static async cleanupAnalyzed(maxAgeMs: number, activeSessionDir?: string | null): Promise<number> {
     let deleted = 0;
     const sessions = await CaptureStorage.listAllSessions();
@@ -228,6 +235,36 @@ export class CaptureStorage {
       const analyzedTime = new Date(analyzedAt.trim()).getTime();
       if (now - analyzedTime > maxAgeMs) {
         await CaptureStorage.deleteSession(session.path);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
+  /**
+   * Delete sessions that phase 1 has fully described, regardless of phase-2 state.
+   * Since descriptions are persistent artifacts stored separately, raw session data
+   * is redundant once described. Never deletes the active session.
+   */
+  static async cleanupDescribed(activeSessionDir?: string | null): Promise<number> {
+    let deleted = 0;
+    if (!fs.existsSync(BASE_DIR)) return 0;
+
+    const dateDirs = await fsp.readdir(BASE_DIR);
+    for (const dateDir of dateDirs) {
+      const datePath = path.join(BASE_DIR, dateDir);
+      const stat = await fsp.stat(datePath).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+
+      const sessionDirs = await fsp.readdir(datePath);
+      for (const sessionDir of sessionDirs) {
+        const sessionPath = path.join(datePath, sessionDir);
+        const sessionStat = await fsp.stat(sessionPath).catch(() => null);
+        if (!sessionStat?.isDirectory()) continue;
+        if (activeSessionDir && sessionPath === activeSessionDir) continue;
+        if (!fs.existsSync(path.join(sessionPath, ".described"))) continue;
+
+        await CaptureStorage.deleteSession(sessionPath);
         deleted++;
       }
     }

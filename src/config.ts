@@ -9,11 +9,20 @@ export type FlowMode = "economy" | "standard" | "pro" | "maximum";
 
 export interface AppConfig {
   mode: FlowMode;
-  cleanupMode: "after-analysis" | "1h" | "4h" | "manual";
+  cleanupMode: "after-described" | "after-analysis" | "1h" | "4h" | "manual";
+  /** Phase 1 (describe) interval — how often to run the describe pass on active capture. */
+  describeIntervalMinutes: number;
+  /** Phase 2 (analyze) interval — how often to run flow detection over accumulated descriptions. */
+  analyzeIntervalMinutes: number;
+  /** How long (minutes) to keep description artifacts before age-based cleanup. null = use mode preset default. */
+  descriptionRetentionMinutes: number | null;
+  /** @deprecated use analyzeIntervalMinutes. Kept for backward-compat migration. */
   detectionIntervalMinutes: number;
   screenshotIntervalMs: number;
   thinking: boolean;
   showRawData: boolean;
+  /** Whether audio capture is enabled by default when a new capture starts. Runtime toggle still works. */
+  audioEnabledByDefault: boolean;
   // Per-mode model overrides (null = use preset default)
   transcriptionModel: string | null;
   detectionModel: string | null;
@@ -27,11 +36,15 @@ export interface AppConfig {
 
 const DEFAULTS: AppConfig = {
   mode: "standard",
-  cleanupMode: "after-analysis",
-  detectionIntervalMinutes: 15,
+  cleanupMode: "after-described",
+  describeIntervalMinutes: 1,
+  analyzeIntervalMinutes: 10,
+  descriptionRetentionMinutes: null, // fall through to mode preset
+  detectionIntervalMinutes: 10, // legacy mirror
   screenshotIntervalMs: 2000,
   thinking: false,
   showRawData: true,
+  audioEnabledByDefault: true,
   transcriptionModel: null,
   detectionModel: null,
   automationModel: null,
@@ -67,6 +80,7 @@ export async function saveConfig(config: Partial<AppConfig>): Promise<AppConfig>
 
 export function cleanupModeToMs(mode: AppConfig["cleanupMode"]): number {
   switch (mode) {
+    case "after-described": return 0;
     case "after-analysis": return 0;
     case "1h": return 60 * 60 * 1000;
     case "4h": return 4 * 60 * 60 * 1000;

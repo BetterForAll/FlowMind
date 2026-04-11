@@ -8,7 +8,11 @@ export interface ModePreset {
   resolution: { width: number; height: number };
   jpegQuality: number;
   contextLimit: number; // max input tokens for the detection model
+  /** Default retention for description artifacts in minutes. User config overrides this. */
+  descriptionRetentionMinutes: number;
 }
+
+const DAY_MIN = 24 * 60;
 
 export const MODE_PRESETS: Record<FlowMode, ModePreset> = {
   economy: {
@@ -19,6 +23,7 @@ export const MODE_PRESETS: Record<FlowMode, ModePreset> = {
     resolution: { width: 960, height: 540 },
     jpegQuality: 60,
     contextLimit: 1_000_000,
+    descriptionRetentionMinutes: 1 * DAY_MIN,
   },
   standard: {
     transcriptionModel: "gemini-2.5-flash",
@@ -28,6 +33,7 @@ export const MODE_PRESETS: Record<FlowMode, ModePreset> = {
     resolution: { width: 960, height: 540 },
     jpegQuality: 70,
     contextLimit: 1_000_000,
+    descriptionRetentionMinutes: 3 * DAY_MIN,
   },
   pro: {
     transcriptionModel: "gemini-2.5-flash",
@@ -37,6 +43,7 @@ export const MODE_PRESETS: Record<FlowMode, ModePreset> = {
     resolution: { width: 1280, height: 720 },
     jpegQuality: 75,
     contextLimit: 1_000_000,
+    descriptionRetentionMinutes: 7 * DAY_MIN,
   },
   maximum: {
     transcriptionModel: "gemini-2.5-flash",
@@ -46,6 +53,7 @@ export const MODE_PRESETS: Record<FlowMode, ModePreset> = {
     resolution: { width: 1280, height: 720 },
     jpegQuality: 80,
     contextLimit: 1_000_000,
+    descriptionRetentionMinutes: 14 * DAY_MIN,
   },
 };
 
@@ -76,6 +84,7 @@ export function getEffectiveSettings(config: {
   automationModel: string | null;
   screenshotResolution: { width: number; height: number } | null;
   screenshotQuality: number | null;
+  descriptionRetentionMinutes: number | null;
 }): ModePreset {
   const preset = MODE_PRESETS[config.mode];
   return {
@@ -86,5 +95,7 @@ export function getEffectiveSettings(config: {
     resolution: config.screenshotResolution ?? preset.resolution,
     jpegQuality: config.screenshotQuality ?? preset.jpegQuality,
     contextLimit: preset.contextLimit,
+    descriptionRetentionMinutes:
+      config.descriptionRetentionMinutes ?? preset.descriptionRetentionMinutes,
   };
 }

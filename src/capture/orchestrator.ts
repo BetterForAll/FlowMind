@@ -65,7 +65,9 @@ export class CaptureOrchestrator extends EventEmitter {
     this.input.start();
     await this.windowTracker.start();
     this.screenshot.start();
-    this.audio.start();
+    if (config.audioEnabledByDefault) {
+      this.audio.start();
+    }
 
     // Emit stats every second
     this.statsInterval = setInterval(() => {
