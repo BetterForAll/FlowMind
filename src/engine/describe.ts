@@ -38,6 +38,12 @@ RULES FOR narrative:
 - Do NOT include sensitive data (passwords, tokens, personal message contents). Redact as "[REDACTED]".
 - If nothing meaningful happened (idle, empty desktop), say so concisely in one or two sentences.
 
+RULES FOR typed-text signal:
+- The timeline may contain \`typed: "..."\` continuation lines under a window segment. These are the exact characters the user typed in that window (with ⏎ representing Enter and \\t representing Tab). Treat this as primary evidence of what the user entered — it is as trustworthy as a screenshot.
+- When the timeline shows a dialog-like pattern (a window titled "Save As", "Open", "File Explorer", a search box, or similar) followed by typed text and an Enter/Tab keypress, describe the STRUCTURAL action confidently: the user saved a file named "<typed text>", searched for "<typed text>", renamed "<typed text>", etc. Do NOT omit the action just because no screenshot captured the dialog — the typed text plus the window title plus the terminating Enter is sufficient evidence.
+- When the typed text looks like a filename or path, reproduce it verbatim (within quotes) rather than paraphrasing. When it looks like free-form text (a search query, a message), quote a representative excerpt.
+- When typed text is present but the action outcome is ambiguous (no Enter, no dialog context), describe what was typed but hedge on the outcome ("the user typed \\"...\\"; the result is not visible in the captured data").
+
 RULES FOR audio transcript (when present):
 - AUDIO RELEVANCE CHECK: Before mentioning anything from the transcript, decide whether it's actually related to the on-screen activity.
   - **Relevant**: the user narrating what they're doing ("I'm going to search for..."), a meeting or call where what's said matches the visible app (Zoom/Teams/Slack call), a video/audio being played on screen whose content matches what's visible, a voice command or dictation that the user acted on.
