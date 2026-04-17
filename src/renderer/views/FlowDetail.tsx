@@ -63,15 +63,17 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [keyScreenshotsByFile, setKeyScreenshotsByFile] = useState<Record<string, string[]>>({});
   // Run-automation state — one active run per automation format at a time.
-  const [activeRun, setActiveRun] = useState<{ runId: string; format: AutomationFormat } | null>(null);
+  const [activeRun, setActiveRun] = useState<{ runId: string; format: AutomationFormat; kind: "run" | "install" } | null>(null);
   const [runOutput, setRunOutput] = useState<{ stream: "stdout" | "stderr"; data: string }[]>([]);
-  const [runStatus, setRunStatus] = useState<"idle" | "running" | "completed" | "killed" | "timeout" | "error">("idle");
+  const [runStatus, setRunStatus] = useState<"idle" | "running" | "installing" | "completed" | "killed" | "timeout" | "error">("idle");
   const [runExitCode, setRunExitCode] = useState<number | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [runMissingInterpreter, setRunMissingInterpreter] = useState<"python" | "nodejs" | null>(null);
   const [runLogs, setRunLogs] = useState<Record<string, RunLogEntry[]>>({});
   const [selectedLogContent, setSelectedLogContent] = useState<string | null>(null);
   const [selectedLogPath, setSelectedLogPath] = useState<string | null>(null);
+  // External (non-stdlib / non-builtin) deps detected in each format's script.
+  const [externalDeps, setExternalDeps] = useState<Record<string, string[]>>({});
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -144,11 +146,24 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     }
   }, []);
 
+  // Fetch the external (non-stdlib / non-builtin) deps declared by the script.
+  const reloadExternalDeps = useCallback(async (filePath: string, format: AutomationFormat) => {
+    if (format !== "python" && format !== "nodejs") return;
+    try {
+      const deps = (await window.flowmind.getExternalDeps(filePath, format)) as string[];
+      setExternalDeps((prev) => ({ ...prev, [format]: deps }));
+    } catch (err) {
+      console.error("Failed to detect external deps:", err);
+    }
+  }, []);
+
   useEffect(() => {
     if (flow?.frontmatter.type === "complete-flow") {
       reloadLogsForFormat(flow.frontmatter.name, activeTab);
+      const a = automationsByFormat[activeTab];
+      if (a) reloadExternalDeps(a.filePath, activeTab);
     }
-  }, [flow, activeTab, reloadLogsForFormat]);
+  }, [flow, activeTab, automationsByFormat, reloadLogsForFormat, reloadExternalDeps]);
 
   // Subscribe to automation run events once on mount.
   useEffect(() => {
@@ -178,9 +193,16 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           setRunExitCode(event.code ?? null);
           if (event.error) setRunError(event.error);
           if (event.missingInterpreter) setRunMissingInterpreter(event.missingInterpreter);
-          // Reload the log list so the new run appears in "Previous runs".
-          if (flow?.frontmatter.name) {
+          // Reload the log list so the new run appears in "Previous runs" —
+          // but only for actual runs, since installs don't write log files.
+          if (current.kind === "run" && flow?.frontmatter.name) {
             reloadLogsForFormat(flow.frontmatter.name, current.format);
+          }
+          // If an install just finished cleanly, refresh the dep list so the
+          // Install prompt hides on successful install.
+          if (current.kind === "install" && event.reason === "completed" && event.code === 0) {
+            const a = automationsByFormat[current.format];
+            if (a) reloadExternalDeps(a.filePath, current.format);
           }
           return null; // run is done
         }
@@ -188,7 +210,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       });
     });
     return unsubscribe;
-  }, [flow, reloadLogsForFormat]);
+  }, [flow, automationsByFormat, reloadLogsForFormat, reloadExternalDeps]);
 
   const viewLog = async (entry: RunLogEntry) => {
     try {
@@ -295,7 +317,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     setRunStatus("running");
     try {
       const result = (await window.flowmind.runAutomation(a.filePath, a.format as "python" | "nodejs")) as { runId: string };
-      setActiveRun({ runId: result.runId, format: a.format as AutomationFormat });
+      setActiveRun({ runId: result.runId, format: a.format as AutomationFormat, kind: "run" });
     } catch (err) {
       setRunStatus("error");
       setRunError(err instanceof Error ? err.message : String(err));
@@ -308,6 +330,31 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       await window.flowmind.killAutomation(activeRun.runId);
     } catch (err) {
       console.error("Kill failed:", err);
+    }
+  };
+
+  const installAutomationDeps = async (a: AutomationFile, deps: string[]) => {
+    if (a.format !== "python" && a.format !== "nodejs") return;
+    if (deps.length === 0) return;
+    const tool = a.format === "python" ? "pip" : "npm";
+    const ok = confirm(
+      `Install these packages via ${tool}?\n\n${deps.join(" ")}\n\n` +
+        `This will modify your ${a.format === "python" ? "Python environment" : "local node_modules"}.`
+    );
+    if (!ok) return;
+    setRunOutput([]);
+    setRunExitCode(null);
+    setRunError(null);
+    setRunMissingInterpreter(null);
+    setSelectedLogContent(null);
+    setSelectedLogPath(null);
+    setRunStatus("installing");
+    try {
+      const result = (await window.flowmind.installDeps(a.filePath, a.format as "python" | "nodejs", deps)) as { runId: string };
+      setActiveRun({ runId: result.runId, format: a.format as AutomationFormat, kind: "install" });
+    } catch (err) {
+      setRunStatus("error");
+      setRunError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -623,11 +670,44 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                   <span>Generated {new Date(a.createdAt).toLocaleString()}</span>
                 </div>
 
+                {/* Install-deps hint — surface when the script imports non-stdlib/non-builtin packages. */}
+                {(a.format === "python" || a.format === "nodejs") &&
+                 (externalDeps[a.format]?.length ?? 0) > 0 && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      padding: 10,
+                      background: "var(--surface-hover)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      fontSize: 13,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <span>
+                      <strong>Required packages:</strong>{" "}
+                      <code style={{ fontSize: 12 }}>{externalDeps[a.format]!.join(" ")}</code>
+                    </span>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: "4px 10px", fontSize: 12, marginLeft: "auto" }}
+                      onClick={() => installAutomationDeps(a, externalDeps[a.format]!)}
+                      disabled={!!activeRun}
+                      title={activeRun ? "Wait for the current run to finish" : `Install via ${a.format === "python" ? "pip" : "npm"}`}
+                    >
+                      Install with {a.format === "python" ? "pip" : "npm"}
+                    </button>
+                  </div>
+                )}
+
                 <div className="btn-group" style={{ marginBottom: 12 }}>
                   {(a.format === "python" || a.format === "nodejs") && (
                     activeRun && activeRun.format === a.format ? (
                       <button className="btn btn-danger" onClick={killAutomation}>
-                        Kill Run
+                        {activeRun.kind === "install" ? "Kill Install" : "Kill Run"}
                       </button>
                     ) : (
                       <button
@@ -676,7 +756,10 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       <span>
                         <strong>
                           {runStatus === "running" && "● Running..."}
-                          {runStatus === "completed" && (runExitCode === 0 ? "✓ Completed" : "✗ Exited")}
+                          {runStatus === "installing" && "● Installing packages..."}
+                          {runStatus === "completed" && (runExitCode === 0
+                            ? (activeRun?.kind === "install" ? "✓ Install complete" : "✓ Completed")
+                            : "✗ Exited")}
                           {runStatus === "killed" && "⊗ Killed"}
                           {runStatus === "timeout" && "⊘ Timed out"}
                           {runStatus === "error" && "⚠ Failed to start"}
