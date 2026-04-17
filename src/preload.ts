@@ -51,6 +51,10 @@ const api = {
     ipcRenderer.invoke("automations:revealInExplorer", filePath),
   deleteAutomation: (filePath: string) =>
     ipcRenderer.invoke("automations:delete", filePath),
+  runAutomation: (filePath: string, format: "python" | "nodejs") =>
+    ipcRenderer.invoke("automations:run", filePath, format),
+  killAutomation: (runId: string) =>
+    ipcRenderer.invoke("automations:kill", runId),
 
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:get"),
@@ -80,6 +84,12 @@ const api = {
       callback(stats);
     ipcRenderer.on("capture:stats", listener);
     return () => ipcRenderer.removeListener("capture:stats", listener);
+  },
+  onAutomationEvent: (callback: (event: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, runEvent: unknown) =>
+      callback(runEvent);
+    ipcRenderer.on("automations:event", listener);
+    return () => ipcRenderer.removeListener("automations:event", listener);
   },
 
   // Audio capture (renderer-side)

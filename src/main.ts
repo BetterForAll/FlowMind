@@ -12,6 +12,7 @@ import { FlowStore } from "./engine/flow-store";
 import { InterviewEngine } from "./engine/interview";
 import { DescribeEngine } from "./engine/describe";
 import { DescriptionStore } from "./engine/description-store";
+import { AutomationRunner, type RunEvent } from "./engine/automation-runner";
 import { CaptureOrchestrator } from "./capture/orchestrator";
 import { CaptureStorage } from "./capture/storage";
 import { loadConfig, saveConfig, type AppConfig } from "./config";
@@ -27,6 +28,7 @@ let flowStore: FlowStore;
 let descriptionStore: DescriptionStore;
 let describeEngine: DescribeEngine;
 let interviewEngine: InterviewEngine;
+let automationRunner: AutomationRunner;
 let captureOrchestrator: CaptureOrchestrator;
 let describeInterval: ReturnType<typeof setInterval> | null = null;
 let analyzeInterval: ReturnType<typeof setInterval> | null = null;
@@ -378,6 +380,21 @@ function setupIPC(): void {
     await flowStore.deleteAutomation(filePath);
   });
 
+  ipcMain.handle(
+    "automations:run",
+    async (_e, filePath: string, format: "python" | "nodejs") => {
+      if (format !== "python" && format !== "nodejs") {
+        throw new Error(`Run is only supported for python and nodejs automations (got ${format})`);
+      }
+      // AutomationRunner validates the path; throwing bubbles up to the renderer.
+      return { runId: automationRunner.run(filePath, format) };
+    }
+  );
+
+  ipcMain.handle("automations:kill", async (_e, runId: string) => {
+    return { killed: automationRunner.kill(runId) };
+  });
+
   // Settings
   ipcMain.handle("settings:get", async () => {
     return loadConfig();
@@ -415,6 +432,11 @@ app.whenReady().then(async () => {
   describeEngine = new DescribeEngine(descriptionStore);
   flowEngine = new FlowDetectionEngine(flowStore, descriptionStore);
   interviewEngine = new InterviewEngine(flowStore);
+  automationRunner = new AutomationRunner();
+  // Forward runner events to the renderer so the Run panel can stream output live.
+  automationRunner.on("event", (event: RunEvent) => {
+    mainWindow?.webContents.send("automations:event", event);
+  });
   captureOrchestrator = new CaptureOrchestrator();
 
   // Forward capture stats to renderer
