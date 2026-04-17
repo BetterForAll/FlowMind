@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { FlowDocument, InterviewQuestion, AutomationFile, FlowWorth } from "../../types";
+import type { FlowDocument, InterviewQuestion, AutomationFile, FlowWorth, FlowParameter } from "../../types";
 import type { DescriptionDocument } from "../../engine/description-store";
 import type { RunLogEntry } from "../../engine/flow-store";
 
@@ -14,6 +14,15 @@ function worthLabel(worth: FlowWorth | undefined): string {
     case "repeatable-uncertain": return "Full workflow — uncertain automation value";
     case "partial-with-gaps":  return "Partial workflow — needs clarification";
     default:                   return "Unclassified";
+  }
+}
+
+function paramKindLabel(kind: FlowParameter["kind"]): { label: string; color: string } {
+  switch (kind) {
+    case "fixed":   return { label: "Fixed",   color: "rgba(148, 163, 184, 0.9)" };
+    case "rule":    return { label: "Rule",    color: "rgba(129, 140, 248, 0.95)" };
+    case "runtime": return { label: "Runtime", color: "rgba(52, 211, 153, 0.95)" };
+    default:        return { label: "Needs classification", color: "rgba(251, 191, 36, 0.95)" };
   }
 }
 
@@ -475,6 +484,83 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           </div>
         )}
       </div>
+
+      {/* Parameters detected in this flow — the variables that change from run
+          to run. Shown only on complete flows that had parameters extracted. */}
+      {isComplete && (flow.frontmatter.parameters?.length ?? 0) > 0 && (
+        <div className="interview-section">
+          <div className="section-title">Parameters ({flow.frontmatter.parameters!.length})</div>
+          <p style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4, marginBottom: 12 }}>
+            Variables the workflow depends on. An automation can hard-code a parameter (Fixed),
+            derive it from context (Rule), or ask for it at runtime (Runtime).
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {flow.frontmatter.parameters!.map((param) => {
+              const k = paramKindLabel(param.kind);
+              return (
+                <div
+                  key={param.name}
+                  style={{
+                    padding: 12,
+                    background: "var(--surface-hover)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <code style={{ fontSize: 13, color: "var(--text)" }}>{param.name}</code>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: "2px 8px",
+                        borderRadius: 12,
+                        background: "transparent",
+                        color: k.color,
+                        border: `1px solid ${k.color}`,
+                        fontWeight: 500,
+                      }}
+                    >
+                      {k.label}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 6, lineHeight: 1.5 }}>
+                    {param.description}
+                  </div>
+                  {param.observed_values && param.observed_values.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Examples:</span>
+                      {param.observed_values.map((v, i) => (
+                        <code
+                          key={i}
+                          style={{
+                            fontSize: 11,
+                            padding: "2px 6px",
+                            background: "var(--bg-code, rgba(0,0,0,0.2))",
+                            border: "1px solid var(--border)",
+                            borderRadius: 3,
+                          }}
+                        >
+                          {v}
+                        </code>
+                      ))}
+                    </div>
+                  )}
+                  {param.kind === "fixed" && param.fixed_value && (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
+                      Value: <code>{param.fixed_value}</code>
+                    </div>
+                  )}
+                  {param.kind === "rule" && param.rule && (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
+                      Rule: {param.rule}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Primary automation shortcuts for complete flows — jump straight to the
           generated output for the chosen format. The tabbed UI below still
