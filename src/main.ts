@@ -395,6 +395,18 @@ function setupIPC(): void {
     return { killed: automationRunner.kill(runId) };
   });
 
+  ipcMain.handle("automations:listRunLogs", async (_e, flowName: string, format: string) => {
+    return flowStore.listRunLogs(flowName, format);
+  });
+
+  ipcMain.handle("automations:readRunLog", async (_e, filePath: string) => {
+    return flowStore.readRunLog(filePath);
+  });
+
+  ipcMain.handle("automations:deleteRunLog", async (_e, filePath: string) => {
+    await flowStore.deleteRunLog(filePath);
+  });
+
   // Settings
   ipcMain.handle("settings:get", async () => {
     return loadConfig();
