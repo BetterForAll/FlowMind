@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import type { FlowDocument, InterviewQuestion, AutomationFile, FlowWorth } from "../../types";
 import type { DescriptionDocument } from "../../engine/description-store";
+import type { RunLogEntry } from "../../engine/flow-store";
+
+const INTERPRETER_DOWNLOADS: Record<"python" | "nodejs", { label: string; url: string }> = {
+  python: { label: "python.org/downloads", url: "https://www.python.org/downloads/" },
+  nodejs: { label: "nodejs.org", url: "https://nodejs.org/" },
+};
 
 function worthLabel(worth: FlowWorth | undefined): string {
   switch (worth) {
@@ -62,6 +68,10 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [runStatus, setRunStatus] = useState<"idle" | "running" | "completed" | "killed" | "timeout" | "error">("idle");
   const [runExitCode, setRunExitCode] = useState<number | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [runMissingInterpreter, setRunMissingInterpreter] = useState<"python" | "nodejs" | null>(null);
+  const [runLogs, setRunLogs] = useState<Record<string, RunLogEntry[]>>({});
+  const [selectedLogContent, setSelectedLogContent] = useState<string | null>(null);
+  const [selectedLogPath, setSelectedLogPath] = useState<string | null>(null);
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -123,6 +133,23 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourcesOpen, sources]);
 
+  // Fetch previous run logs for the current flow + active tab format.
+  const reloadLogsForFormat = useCallback(async (flowName: string, format: AutomationFormat) => {
+    if (format !== "python" && format !== "nodejs") return;
+    try {
+      const entries = (await window.flowmind.listRunLogs(flowName, format)) as RunLogEntry[];
+      setRunLogs((prev) => ({ ...prev, [format]: entries }));
+    } catch (err) {
+      console.error("Failed to list run logs:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (flow?.frontmatter.type === "complete-flow") {
+      reloadLogsForFormat(flow.frontmatter.name, activeTab);
+    }
+  }, [flow, activeTab, reloadLogsForFormat]);
+
   // Subscribe to automation run events once on mount.
   useEffect(() => {
     interface RunEvent {
@@ -133,6 +160,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       code?: number | null;
       reason?: "completed" | "killed" | "timeout" | "error";
       error?: string;
+      missingInterpreter?: "python" | "nodejs";
+      logFilePath?: string;
     }
     const unsubscribe = window.flowmind.onAutomationEvent((raw: unknown) => {
       const event = raw as RunEvent;
@@ -148,13 +177,44 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           setRunStatus(event.reason ?? "completed");
           setRunExitCode(event.code ?? null);
           if (event.error) setRunError(event.error);
+          if (event.missingInterpreter) setRunMissingInterpreter(event.missingInterpreter);
+          // Reload the log list so the new run appears in "Previous runs".
+          if (flow?.frontmatter.name) {
+            reloadLogsForFormat(flow.frontmatter.name, current.format);
+          }
           return null; // run is done
         }
         return current;
       });
     });
     return unsubscribe;
-  }, []);
+  }, [flow, reloadLogsForFormat]);
+
+  const viewLog = async (entry: RunLogEntry) => {
+    try {
+      const content = (await window.flowmind.readRunLog(entry.filePath)) as string;
+      setSelectedLogContent(content);
+      setSelectedLogPath(entry.filePath);
+    } catch (err) {
+      console.error("Failed to read log:", err);
+    }
+  };
+
+  const deleteLog = async (entry: RunLogEntry) => {
+    if (!confirm(`Delete log ${entry.filename}? This cannot be undone.`)) return;
+    try {
+      await window.flowmind.deleteRunLog(entry.filePath);
+      if (selectedLogPath === entry.filePath) {
+        setSelectedLogContent(null);
+        setSelectedLogPath(null);
+      }
+      if (flow?.frontmatter.name) {
+        await reloadLogsForFormat(flow.frontmatter.name, activeTab);
+      }
+    } catch (err) {
+      console.error("Failed to delete log:", err);
+    }
+  };
 
   const submitAllAnswers = async () => {
     const unanswered = questions.filter((q) => !q.answered);
@@ -229,6 +289,9 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     setRunOutput([]);
     setRunExitCode(null);
     setRunError(null);
+    setRunMissingInterpreter(null);
+    setSelectedLogContent(null);
+    setSelectedLogPath(null);
     setRunStatus("running");
     try {
       const result = (await window.flowmind.runAutomation(a.filePath, a.format as "python" | "nodejs")) as { runId: string };
@@ -632,6 +695,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                           setRunOutput([]);
                           setRunExitCode(null);
                           setRunError(null);
+                          setRunMissingInterpreter(null);
                         }}
                         disabled={runStatus === "running"}
                       >
@@ -641,6 +705,31 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                     {runError && (
                       <div style={{ padding: 12, color: "var(--red, #e55)", fontSize: 13 }}>
                         {runError}
+                      </div>
+                    )}
+                    {runMissingInterpreter && (
+                      <div
+                        style={{
+                          padding: 12,
+                          background: "rgba(251, 191, 36, 0.08)",
+                          borderTop: "1px solid var(--border)",
+                          borderBottom: "1px solid var(--border)",
+                          fontSize: 13,
+                        }}
+                      >
+                        <strong>
+                          {runMissingInterpreter === "python" ? "Python" : "Node.js"} is not installed on this machine.
+                        </strong>{" "}
+                        Install it, then try Run again. Download from{" "}
+                        <a
+                          href={INTERPRETER_DOWNLOADS[runMissingInterpreter].url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "var(--accent)" }}
+                        >
+                          {INTERPRETER_DOWNLOADS[runMissingInterpreter].label}
+                        </a>
+                        .
                       </div>
                     )}
                     <pre
@@ -669,6 +758,119 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         </span>
                       ))}
                     </pre>
+                  </div>
+                )}
+
+                {/* Previous runs — persistent log history. Shown for python/nodejs only. */}
+                {(activeTab === "python" || activeTab === "nodejs") && (runLogs[activeTab]?.length ?? 0) > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div className="section-title" style={{ fontSize: 13, marginTop: 8 }}>
+                      Previous runs ({runLogs[activeTab]?.length ?? 0})
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+                      {(runLogs[activeTab] ?? []).map((entry) => {
+                        const isSelected = entry.filePath === selectedLogPath;
+                        const statusColor = entry.reason === "completed" && entry.exitCode === 0
+                          ? "var(--green)"
+                          : entry.reason === "completed"
+                          ? "var(--yellow)"
+                          : "var(--red, #e55)";
+                        const statusText = entry.reason === null
+                          ? "unclosed"
+                          : entry.reason === "completed"
+                          ? (entry.exitCode === 0 ? "ok" : `exit ${entry.exitCode}`)
+                          : entry.reason;
+                        return (
+                          <div
+                            key={entry.filePath}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 10,
+                              padding: "6px 10px",
+                              background: isSelected ? "var(--surface-hover)" : "transparent",
+                              border: "1px solid var(--border)",
+                              borderRadius: 4,
+                              fontSize: 12,
+                            }}
+                          >
+                            <span style={{ color: statusColor, minWidth: 70 }}>{statusText}</span>
+                            <span style={{ flex: 1, color: "var(--text-muted)" }}>
+                              {new Date(entry.startedAt).toLocaleString()}
+                            </span>
+                            {entry.durationMs != null && (
+                              <span style={{ color: "var(--text-muted)" }}>
+                                {entry.durationMs < 1000
+                                  ? `${entry.durationMs} ms`
+                                  : `${(entry.durationMs / 1000).toFixed(1)} s`}
+                              </span>
+                            )}
+                            <span style={{ color: "var(--text-muted)" }}>{(entry.sizeBytes / 1024).toFixed(1)} KB</span>
+                            <button
+                              className="btn btn-secondary"
+                              style={{ padding: "2px 8px", fontSize: 11 }}
+                              onClick={() => viewLog(entry)}
+                            >
+                              {isSelected ? "Viewing" : "View"}
+                            </button>
+                            <button
+                              className="btn btn-secondary"
+                              style={{ padding: "2px 8px", fontSize: 11 }}
+                              onClick={() => deleteLog(entry)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {selectedLogContent !== null && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          border: "1px solid var(--border)",
+                          borderRadius: 4,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: "6px 10px",
+                            background: "var(--surface-hover)",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            fontSize: 12,
+                          }}
+                        >
+                          <span>{selectedLogPath?.split(/[\\/]/).pop()}</span>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: "2px 10px", fontSize: 11 }}
+                            onClick={() => {
+                              setSelectedLogContent(null);
+                              setSelectedLogPath(null);
+                            }}
+                          >
+                            Close
+                          </button>
+                        </div>
+                        <pre
+                          style={{
+                            margin: 0,
+                            padding: 12,
+                            background: "var(--bg-code, rgba(0,0,0,0.25))",
+                            fontSize: 12,
+                            maxHeight: 400,
+                            overflow: "auto",
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {selectedLogContent}
+                        </pre>
+                      </div>
+                    )}
                   </div>
                 )}
 
