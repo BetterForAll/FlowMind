@@ -61,6 +61,14 @@ const api = {
     ipcRenderer.invoke("automations:disableAutoFix", runId),
   promotePatch: (patchPath: string) =>
     ipcRenderer.invoke("automations:promotePatch", patchPath),
+  // Stage 2 — agent-first execution
+  runAsAgent: (
+    flowId: string,
+    params: Record<string, string>,
+    opts?: { synthesize?: boolean; format?: "python" | "nodejs" }
+  ) => ipcRenderer.invoke("automations:runAsAgent", flowId, params, opts ?? {}),
+  answerAgentPrompt: (promptId: string, answer: string) =>
+    ipcRenderer.invoke("automations:answerAgentPrompt", promptId, answer),
   killAutomation: (runId: string) =>
     ipcRenderer.invoke("automations:kill", runId),
   sendInputToAutomation: (runId: string, text: string) =>
@@ -121,6 +129,14 @@ const api = {
     ipcRenderer.on("automations:autoFixEvent", listener);
     return () => {
       ipcRenderer.removeListener("automations:autoFixEvent", listener);
+    };
+  },
+  onAgentEvent: (callback: (event: unknown) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, agentEvent: unknown) =>
+      callback(agentEvent);
+    ipcRenderer.on("automations:agentEvent", listener);
+    return () => {
+      ipcRenderer.removeListener("automations:agentEvent", listener);
     };
   },
 

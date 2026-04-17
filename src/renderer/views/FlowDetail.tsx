@@ -53,6 +53,17 @@ function encodePath(p: string): string {
   return `flowmind://file/${encodeURIComponent(p.replace(/\\/g, "/"))}`;
 }
 
+/**
+ * Collapse large tool-call results for the agent trace viewer. Some tool
+ * results (HTTP bodies, browser_extract_text) can be hundreds of KB —
+ * rendering all of that inline makes the panel unusable. The full result
+ * is still in the trace and the saved log; this is a display-only trim.
+ */
+function truncateForDisplay(s: string): string {
+  const MAX = 400;
+  return s.length > MAX ? s.slice(0, MAX) + "…" : s;
+}
+
 type AutomationFormat = "python" | "nodejs" | "claude-skill" | "tutorial";
 
 const FORMAT_TABS: { key: AutomationFormat; label: string }[] = [
@@ -131,6 +142,42 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   // between retries; this mirror is purely informational).
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [_lastRunParams, setLastRunParams] = useState<Record<string, string>>({});
+  // Agent-mode (Stage 2) state. Separate from activeRun because agent
+  // runs don't go through the subprocess-based AutomationRunner.
+  interface AgentStep {
+    index: number;
+    name: string;
+    args: Record<string, unknown>;
+    result?: Record<string, unknown>;
+    error?: string;
+    durationMs?: number;
+  }
+  const [agentRun, setAgentRun] = useState<
+    | null
+    | {
+        runId: string;
+        format: AutomationFormat;
+        status: "running" | "success" | "failed" | "synthesizing" | "saved";
+        reason?: string;
+        finalText?: string;
+        synthesizedPath?: string;
+      }
+  >(null);
+  const [agentSteps, setAgentSteps] = useState<AgentStep[]>([]);
+  const [agentPrompt, setAgentPrompt] = useState<
+    | null
+    | {
+        promptId: string;
+        prompt: string;
+        kind: "text" | "yesno" | "choice";
+        choices?: string[];
+      }
+  >(null);
+  const [agentPromptAnswer, setAgentPromptAnswer] = useState("");
+  /** If set, the parameter form's "Run with these values" should fire
+   *  the AGENT (not the script runner) for this format. Cleared when
+   *  the agent kicks off or the form is dismissed. */
+  const [pendingAgentFormat, setPendingAgentFormat] = useState<"python" | "nodejs" | null>(null);
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -401,6 +448,89 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     return unsubscribe;
   }, [flow, loadAutomations]);
 
+  // Agent-mode event subscription (Stage 2). Drives the live trace view
+  // and the ask_user prompt modal.
+  useEffect(() => {
+    type Ev =
+      | { type: "agent_started"; runId: string; flowId: string }
+      | {
+          type: "agent_step_started";
+          runId: string;
+          index: number;
+          name: string;
+          args: Record<string, unknown>;
+        }
+      | {
+          type: "agent_step_finished";
+          runId: string;
+          index: number;
+          name: string;
+          result: Record<string, unknown>;
+          error?: string;
+          durationMs: number;
+        }
+      | { type: "agent_thinking"; runId: string; text: string }
+      | {
+          type: "agent_asking_user";
+          runId: string;
+          promptId: string;
+          prompt: string;
+          kind: "text" | "yesno" | "choice";
+          choices?: string[];
+        }
+      | { type: "agent_finished"; runId: string; success: boolean; reason: string; trace: unknown[] }
+      | { type: "agent_error"; runId: string; error: string }
+      | { type: "agent_trace_saved"; runId: string; filePath: string; format: "python" | "nodejs" }
+      | { type: "agent_synthesize_failed"; runId: string; reason: string };
+
+    const unsubscribe = window.flowmind.onAgentEvent((raw: unknown) => {
+      const ev = raw as Ev;
+      setAgentRun((curr) => {
+        if (!curr || ev.runId !== curr.runId) return curr;
+
+        if (ev.type === "agent_step_started") {
+          setAgentSteps((prev) => [
+            ...prev,
+            { index: ev.index, name: ev.name, args: ev.args },
+          ]);
+        } else if (ev.type === "agent_step_finished") {
+          setAgentSteps((prev) =>
+            prev.map((s) =>
+              s.index === ev.index
+                ? { ...s, result: ev.result, error: ev.error, durationMs: ev.durationMs }
+                : s
+            )
+          );
+        } else if (ev.type === "agent_thinking") {
+          return { ...curr, finalText: ev.text };
+        } else if (ev.type === "agent_asking_user") {
+          setAgentPrompt({
+            promptId: ev.promptId,
+            prompt: ev.prompt,
+            kind: ev.kind,
+            choices: ev.choices,
+          });
+          setAgentPromptAnswer("");
+        } else if (ev.type === "agent_finished") {
+          return {
+            ...curr,
+            status: ev.success ? (curr.synthesizedPath ? "saved" : "synthesizing") : "failed",
+            reason: ev.reason,
+          };
+        } else if (ev.type === "agent_error") {
+          return { ...curr, status: "failed", reason: ev.error };
+        } else if (ev.type === "agent_trace_saved") {
+          if (flow?.frontmatter.name) loadAutomations(flow.frontmatter.name);
+          return { ...curr, status: "saved", synthesizedPath: ev.filePath };
+        } else if (ev.type === "agent_synthesize_failed") {
+          return { ...curr, status: "failed", reason: `Synthesis failed: ${ev.reason}` };
+        }
+        return curr;
+      });
+    });
+    return unsubscribe;
+  }, [flow, loadAutomations]);
+
   const viewLog = async (entry: RunLogEntry) => {
     try {
       const content = (await window.flowmind.readRunLog(entry.filePath)) as string;
@@ -570,6 +700,71 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       };
     });
   }, [activeTab, automationContent, flow]);
+
+  /**
+   * Kick off an agent-mode run. Unlike runAutomation this doesn't execute
+   * a script — it tells main.ts to spawn the Gemini function-calling loop
+   * against the flow. Params are collected up front the same way as for
+   * script runs. Synthesis is requested so that after a successful agent
+   * run, the trace becomes a replay script in the matching format.
+   */
+  const startAgentRun = async (a: AutomationFile) => {
+    if (a.format !== "python" && a.format !== "nodejs") return;
+    const ok = confirm(
+      `Run as agent?\n\n` +
+        `Gemini will call real tools (filesystem, HTTP, subprocess, Playwright) ` +
+        `step-by-step to accomplish this flow. Useful when the pre-generated script ` +
+        `doesn't match your local environment. The agent has full user permissions, ` +
+        `so only run this on flows you understand.\n\n` +
+        `On success, the trace is converted to a ${a.format === "python" ? "Python" : "Node.js"} script ` +
+        `and saved as the primary automation for this flow.`
+    );
+    if (!ok) return;
+    // Gate on params — same treatment as the script runner so the agent
+    // doesn't have to ask_user for values the flow already knows.
+    const params = formParameters();
+    if (params.length > 0) {
+      setParamDraft((prev) => {
+        const next = { ...prev };
+        for (const p of params) {
+          if (!(p.name in next)) next[p.name] = p.observed_values?.[0] ?? "";
+        }
+        return next;
+      });
+      setParamFormOpen(true);
+      // Stash the intent so "Run with these values" can fire the agent
+      // instead of the script runner on that format.
+      setPendingAgentFormat(a.format as "python" | "nodejs");
+      return;
+    }
+    kickOffAgentRun(a.format as "python" | "nodejs", {});
+  };
+
+  const kickOffAgentRun = async (
+    format: "python" | "nodejs",
+    params: Record<string, string>
+  ) => {
+    setAgentSteps([]);
+    setAgentPrompt(null);
+    setAgentPromptAnswer("");
+    try {
+      const result = (await window.flowmind.runAsAgent(
+        flowId,
+        params,
+        { synthesize: true, format }
+      )) as { runId: string };
+      setAgentRun({ runId: result.runId, format, status: "running" });
+      setPendingAgentFormat(null);
+      setParamFormOpen(false);
+    } catch (err) {
+      setAgentRun({
+        runId: "",
+        format,
+        status: "failed",
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   /** Open the parameter entry form (if the script/flow has params) or run straight. */
   const startRun = (a: AutomationFile) => {
@@ -1056,14 +1251,24 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         {activeRun.kind === "install" ? "Kill Install" : "Kill Run"}
                       </button>
                     ) : (
-                      <button
-                        className="btn btn-primary"
-                        onClick={() => startRun(a)}
-                        disabled={!!activeRun}
-                        title={activeRun ? "Another automation is currently running" : `Execute this ${a.format === "python" ? "Python" : "Node.js"} script`}
-                      >
-                        Run Automation
-                      </button>
+                      <>
+                        <button
+                          className="btn btn-primary"
+                          onClick={() => startRun(a)}
+                          disabled={!!activeRun || agentRun !== null}
+                          title={activeRun ? "Another automation is currently running" : `Execute this ${a.format === "python" ? "Python" : "Node.js"} script`}
+                        >
+                          Run Automation
+                        </button>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={() => startAgentRun(a)}
+                          disabled={!!activeRun || agentRun !== null}
+                          title="Run as an agent: Gemini calls real tools step-by-step instead of executing the pre-generated script. After success, the trace replaces the script with a known-good replay."
+                        >
+                          Run as Agent
+                        </button>
+                      </>
                     )
                   )}
                   <button className="btn btn-secondary" onClick={() => openAutomation(a)}>Open</button>
@@ -1153,7 +1358,16 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                     <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                       <button
                         className="btn btn-primary"
-                        onClick={() => runAutomation(a, paramDraft)}
+                        onClick={() => {
+                          // If the user initiated Run-as-Agent earlier,
+                          // pendingAgentFormat is set — fire the agent
+                          // instead of the plain script runner.
+                          if (pendingAgentFormat) {
+                            kickOffAgentRun(pendingAgentFormat, paramDraft);
+                          } else {
+                            runAutomation(a, paramDraft);
+                          }
+                        }}
                         disabled={
                           !!activeRun ||
                           !(formParameters().every(
@@ -1161,11 +1375,14 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                           ))
                         }
                       >
-                        Run with these values
+                        {pendingAgentFormat ? "Run as Agent with these values" : "Run with these values"}
                       </button>
                       <button
                         className="btn btn-secondary"
-                        onClick={() => setParamFormOpen(false)}
+                        onClick={() => {
+                          setParamFormOpen(false);
+                          setPendingAgentFormat(null);
+                        }}
                       >
                         Cancel
                       </button>
@@ -1456,6 +1673,238 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         >
                           EOF
                         </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Agent live trace panel (Stage 2). Replaces the plain
+                    run-output panel when an agent run is active/finished,
+                    showing each tool call as it happens and the final
+                    outcome. Kept visible until the user dismisses it or
+                    starts a new run. */}
+                {agentRun && agentRun.format === activeTab && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: "8px 12px",
+                        background: "var(--surface-hover)",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        fontSize: 13,
+                      }}
+                    >
+                      <strong>
+                        {agentRun.status === "running" && "● Agent running..."}
+                        {agentRun.status === "synthesizing" && "● Synthesizing replay script..."}
+                        {agentRun.status === "saved" && "✓ Agent finished — script saved"}
+                        {agentRun.status === "success" && "✓ Agent finished"}
+                        {agentRun.status === "failed" && "⚠ Agent failed"}
+                      </strong>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: "2px 10px", fontSize: 12 }}
+                        onClick={() => {
+                          setAgentRun(null);
+                          setAgentSteps([]);
+                          setAgentPrompt(null);
+                        }}
+                        disabled={agentRun.status === "running" || agentRun.status === "synthesizing"}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {agentRun.reason && agentRun.status === "failed" && (
+                      <div style={{ padding: 12, color: "var(--red, #e55)", fontSize: 13 }}>
+                        {agentRun.reason}
+                      </div>
+                    )}
+                    {agentRun.synthesizedPath && (
+                      <div style={{ padding: 10, fontSize: 12, color: "var(--text-muted)", borderBottom: "1px solid var(--border)" }}>
+                        Replay script saved to <code>{agentRun.synthesizedPath}</code>
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        maxHeight: 420,
+                        overflow: "auto",
+                        fontFamily: "monospace",
+                        fontSize: 12,
+                      }}
+                    >
+                      {agentSteps.length === 0 && agentRun.status === "running" && (
+                        <div style={{ padding: 12, color: "var(--text-muted)" }}>
+                          Waiting for the first tool call...
+                        </div>
+                      )}
+                      {agentSteps.map((s) => (
+                        <div
+                          key={s.index}
+                          style={{
+                            padding: "8px 12px",
+                            borderBottom: "1px solid var(--border)",
+                            background: s.error ? "rgba(229, 85, 85, 0.06)" : "transparent",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                            <span>
+                              <span style={{ color: "var(--text-muted)" }}>#{s.index}</span>{" "}
+                              <strong style={{ color: "var(--accent)" }}>{s.name}</strong>
+                              {s.durationMs != null && (
+                                <span style={{ color: "var(--text-muted)", marginLeft: 8 }}>
+                                  {s.durationMs < 1000 ? `${s.durationMs} ms` : `${(s.durationMs / 1000).toFixed(1)} s`}
+                                </span>
+                              )}
+                            </span>
+                            {!s.result && !s.error && (
+                              <span style={{ color: "var(--text-muted)", fontSize: 11 }}>running…</span>
+                            )}
+                          </div>
+                          <pre
+                            style={{
+                              margin: "4px 0 0",
+                              padding: 0,
+                              fontSize: 11,
+                              color: "var(--text-muted)",
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            args: {JSON.stringify(s.args)}
+                          </pre>
+                          {s.result && (
+                            <pre
+                              style={{
+                                margin: "4px 0 0",
+                                padding: 0,
+                                fontSize: 11,
+                                color: s.error ? "var(--red, #e55)" : "var(--text)",
+                                whiteSpace: "pre-wrap",
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              {s.error ? `error: ${s.error}` : `→ ${truncateForDisplay(JSON.stringify(s.result))}`}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                      {agentRun.finalText && (
+                        <div
+                          style={{
+                            padding: "10px 12px",
+                            fontSize: 13,
+                            fontFamily: "var(--font-sans, system-ui)",
+                            background: "rgba(129, 140, 248, 0.05)",
+                          }}
+                        >
+                          <strong>Agent summary:</strong> {agentRun.finalText}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Agent ask_user prompt — modal-ish panel that blocks
+                    further steps until the user answers. */}
+                {agentPrompt && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      padding: 12,
+                      border: "1px solid var(--accent)",
+                      borderRadius: 4,
+                      background: "rgba(129, 140, 248, 0.08)",
+                      fontSize: 13,
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                      The agent is asking:
+                    </div>
+                    <div style={{ marginBottom: 10 }}>{agentPrompt.prompt}</div>
+                    {agentPrompt.kind === "text" && (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <input
+                          type="text"
+                          value={agentPromptAnswer}
+                          onChange={(e) => setAgentPromptAnswer(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              window.flowmind.answerAgentPrompt(agentPrompt.promptId, agentPromptAnswer);
+                              setAgentPrompt(null);
+                            }
+                          }}
+                          autoFocus
+                          style={{
+                            flex: 1,
+                            padding: "6px 8px",
+                            background: "var(--bg-code, rgba(0,0,0,0.25))",
+                            border: "1px solid var(--border)",
+                            borderRadius: 3,
+                            color: "var(--text)",
+                            fontFamily: "monospace",
+                            fontSize: 12,
+                          }}
+                        />
+                        <button
+                          className="btn btn-primary"
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                          onClick={() => {
+                            window.flowmind.answerAgentPrompt(agentPrompt.promptId, agentPromptAnswer);
+                            setAgentPrompt(null);
+                          }}
+                          disabled={agentPromptAnswer.trim().length === 0}
+                        >
+                          Send
+                        </button>
+                      </div>
+                    )}
+                    {agentPrompt.kind === "yesno" && (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          className="btn btn-primary"
+                          style={{ padding: "4px 14px", fontSize: 12 }}
+                          onClick={() => {
+                            window.flowmind.answerAgentPrompt(agentPrompt.promptId, "yes");
+                            setAgentPrompt(null);
+                          }}
+                        >
+                          Yes
+                        </button>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: "4px 14px", fontSize: 12 }}
+                          onClick={() => {
+                            window.flowmind.answerAgentPrompt(agentPrompt.promptId, "no");
+                            setAgentPrompt(null);
+                          }}
+                        >
+                          No
+                        </button>
+                      </div>
+                    )}
+                    {agentPrompt.kind === "choice" && agentPrompt.choices && (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {agentPrompt.choices.map((c) => (
+                          <button
+                            key={c}
+                            className="btn btn-secondary"
+                            style={{ padding: "4px 12px", fontSize: 12 }}
+                            onClick={() => {
+                              window.flowmind.answerAgentPrompt(agentPrompt.promptId, c);
+                              setAgentPrompt(null);
+                            }}
+                          >
+                            {c}
+                          </button>
+                        ))}
                       </div>
                     )}
                   </div>

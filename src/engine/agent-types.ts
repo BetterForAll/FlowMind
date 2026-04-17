@@ -53,7 +53,15 @@ export type AgentEvent =
   | { type: "agent_thinking"; runId: string; text: string }
   | { type: "agent_asking_user"; runId: string; promptId: string; prompt: string; kind: "text" | "yesno" | "choice"; choices?: string[] }
   | { type: "agent_finished"; runId: string; success: boolean; reason: string; trace: TraceStep[] }
-  | { type: "agent_error"; runId: string; error: string };
+  | { type: "agent_error"; runId: string; error: string }
+  /** Synthesized script has been saved as the flow's primary automation
+   *  for the target format. Fires after a successful agent run when the
+   *  caller asked for synthesis. */
+  | { type: "agent_trace_saved"; runId: string; filePath: string; format: "python" | "nodejs" }
+  /** Synthesis failed (e.g. Gemini returned a script missing parameter
+   *  names). The agent run itself succeeded — the replay script is just
+   *  unavailable. Users can still rerun via agent mode. */
+  | { type: "agent_synthesize_failed"; runId: string; reason: string };
 
 /**
  * Tool declaration — the shape the executor registers with Gemini. Kept

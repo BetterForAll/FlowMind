@@ -15,7 +15,11 @@ import { DescriptionStore } from "./engine/description-store";
 import { AutomationRunner, type RunEvent } from "./engine/automation-runner";
 import { AutoFixOrchestrator, type AutoFixEvent } from "./engine/auto-fix-orchestrator";
 import { ScriptDoctor } from "./engine/script-doctor";
+import { AgentExecutor } from "./engine/agent-executor";
+import { ScriptSynthesizer } from "./engine/script-synthesizer";
+import type { AgentEvent } from "./engine/agent-types";
 import { CaptureOrchestrator } from "./capture/orchestrator";
+import { randomUUID } from "node:crypto";
 import { CaptureStorage } from "./capture/storage";
 import { loadConfig, saveConfig, type AppConfig } from "./config";
 import { getEffectiveSettings } from "./ai/mode-presets";
@@ -32,7 +36,46 @@ let describeEngine: DescribeEngine;
 let interviewEngine: InterviewEngine;
 let automationRunner: AutomationRunner;
 let autoFixOrchestrator: AutoFixOrchestrator | null = null;
+let agentExecutor: AgentExecutor | null = null;
+let scriptSynthesizer: ScriptSynthesizer | null = null;
 let captureOrchestrator: CaptureOrchestrator;
+/**
+ * Pending ask_user prompts. The agent executor calls a bridge function
+ * that pushes a prompt to the renderer and returns a promise; the
+ * renderer answers via the `agent:answerUser` IPC and the promise
+ * resolves. Keyed by promptId. Cleared on answer, on agent_finished,
+ * or on agent_error.
+ */
+const pendingAgentPrompts = new Map<string, (answer: string) => void>();
+
+/**
+ * Bridge the agent-executor's askUser tool to the renderer. Creates a
+ * fresh promptId, pushes the prompt to the renderer over the agent-event
+ * channel, and returns a Promise that resolves when the renderer invokes
+ * `automations:answerAgentPrompt` with that promptId. No cancellation —
+ * if the user closes the app while a prompt is open, the promise never
+ * resolves (but the agent's 30-step / 5-error ceilings bound the run).
+ */
+function bridgeAgentAskUser(
+  runId: string,
+  prompt: string,
+  kind: "text" | "yesno" | "choice",
+  choices?: string[]
+): Promise<string> {
+  const promptId = randomUUID();
+  const pending = new Promise<string>((resolve) => {
+    pendingAgentPrompts.set(promptId, resolve);
+  });
+  mainWindow?.webContents.send("automations:agentEvent", {
+    type: "agent_asking_user",
+    runId,
+    promptId,
+    prompt,
+    kind,
+    choices,
+  });
+  return pending;
+}
 let describeInterval: ReturnType<typeof setInterval> | null = null;
 let analyzeInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -442,6 +485,103 @@ function setupIPC(): void {
     return { primaryPath };
   });
 
+  // --- Stage 2: agent-first execution ---------------------------------
+  //
+  // Run a flow "as an agent" — Gemini function-calling drives real tools
+  // instead of us generating a static script up front. Emits
+  // `automations:agentEvent` over the channel the renderer subscribes to;
+  // returns the runId synchronously so the UI can filter events. The
+  // actual run resolves later with the trace; if synthesize=true we also
+  // save the trace as a replay script.
+  ipcMain.handle(
+    "automations:runAsAgent",
+    async (
+      _e,
+      flowId: string,
+      params: Record<string, string>,
+      opts: { synthesize?: boolean; format?: "python" | "nodejs" } = {}
+    ) => {
+      if (!agentExecutor) {
+        throw new Error("Agent mode is disabled — GEMINI_API_KEY is missing.");
+      }
+      const flow = await flowStore.getFlowById(flowId);
+      if (!flow) throw new Error(`Flow not found: ${flowId}`);
+      if (flow.frontmatter.type !== "complete-flow") {
+        throw new Error("Agent mode only runs on complete flows.");
+      }
+
+      const runId = randomUUID();
+      const config = await loadConfig();
+      const model = getEffectiveSettings(config).automationModel;
+
+      // Kick off the agent run but don't await here — return the runId to
+      // the renderer so it can render the live trace, then let the loop
+      // resolve in the background. When it finishes, synthesize on demand
+      // and send the final "trace_saved" event.
+      (async () => {
+        try {
+          const result = await agentExecutor!.run({
+            runId,
+            flow,
+            params,
+            model,
+            askUser: bridgeAgentAskUser,
+          });
+
+          // On success, optionally synthesize and save as a replay script.
+          if (result.success && opts.synthesize && opts.format && scriptSynthesizer) {
+            try {
+              const { source } = await scriptSynthesizer.synthesize({
+                flow,
+                params,
+                trace: result.trace,
+                format: opts.format,
+                model,
+              });
+              const ext = opts.format === "python" ? "py" : "js";
+              const filePath = await flowStore.saveAutomation(
+                flow.frontmatter.name,
+                source,
+                opts.format,
+                ext
+              );
+              mainWindow?.webContents.send("automations:agentEvent", {
+                type: "agent_trace_saved",
+                runId,
+                filePath,
+                format: opts.format,
+              });
+            } catch (err) {
+              mainWindow?.webContents.send("automations:agentEvent", {
+                type: "agent_synthesize_failed",
+                runId,
+                reason: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+        } catch (err) {
+          mainWindow?.webContents.send("automations:agentEvent", {
+            type: "agent_error",
+            runId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })();
+
+      return { runId };
+    }
+  );
+
+  // Resolve a pending ask_user prompt from the renderer.
+  ipcMain.handle("automations:answerAgentPrompt", async (_e, promptId: string, answer: string) => {
+    const resolve = pendingAgentPrompts.get(promptId);
+    if (resolve) {
+      pendingAgentPrompts.delete(promptId);
+      resolve(answer);
+    }
+    return { ok: !!resolve };
+  });
+
   ipcMain.handle("automations:kill", async (_e, runId: string) => {
     return { killed: automationRunner.kill(runId) };
   });
@@ -573,6 +713,22 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.warn(
       "[FlowMind] Auto-fix disabled — ScriptDoctor init failed:",
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  // Agent executor + script synthesizer (Stage 2). Same API-key gating
+  // as the doctor — if the key is absent, the Run-as-agent IPC will
+  // surface an error back to the UI rather than crash here.
+  try {
+    agentExecutor = new AgentExecutor();
+    scriptSynthesizer = new ScriptSynthesizer();
+    agentExecutor.on("event", (event: AgentEvent) => {
+      mainWindow?.webContents.send("automations:agentEvent", event);
+    });
+  } catch (err) {
+    console.warn(
+      "[FlowMind] Agent mode disabled — init failed:",
       err instanceof Error ? err.message : err
     );
   }
