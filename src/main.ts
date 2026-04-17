@@ -407,6 +407,32 @@ function setupIPC(): void {
     await flowStore.deleteRunLog(filePath);
   });
 
+  ipcMain.handle(
+    "automations:getExternalDeps",
+    async (_e, filePath: string, format: "python" | "nodejs") => {
+      const content = await flowStore.readAutomation(filePath);
+      const { detectExternalDeps } = await import("./engine/dep-detector");
+      return detectExternalDeps(content, format);
+    }
+  );
+
+  ipcMain.handle(
+    "automations:installDeps",
+    async (_e, filePath: string, format: "python" | "nodejs", packages: string[]) => {
+      if (format !== "python" && format !== "nodejs") {
+        throw new Error(`Install is only supported for python and nodejs (got ${format})`);
+      }
+      if (!Array.isArray(packages) || packages.length === 0) {
+        throw new Error("installDeps requires a non-empty packages array");
+      }
+      // Paths: use the directory of the target script so `npm install` puts
+      // node_modules next to it, matching what the run step will use as cwd.
+      const pathMod = await import("node:path");
+      const cwd = pathMod.dirname(filePath);
+      return { runId: automationRunner.installDeps(format, packages, cwd) };
+    }
+  );
+
   // Settings
   ipcMain.handle("settings:get", async () => {
     return loadConfig();

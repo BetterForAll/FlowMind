@@ -61,6 +61,10 @@ const api = {
     ipcRenderer.invoke("automations:readRunLog", filePath),
   deleteRunLog: (filePath: string) =>
     ipcRenderer.invoke("automations:deleteRunLog", filePath),
+  getExternalDeps: (filePath: string, format: "python" | "nodejs") =>
+    ipcRenderer.invoke("automations:getExternalDeps", filePath, format),
+  installDeps: (filePath: string, format: "python" | "nodejs", packages: string[]) =>
+    ipcRenderer.invoke("automations:installDeps", filePath, format, packages),
 
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:get"),

@@ -210,6 +210,106 @@ export class AutomationRunner extends EventEmitter {
   }
 
   /**
+   * Install the given packages via `pip install` (python) or `npm install`
+   * (nodejs). Streams output via the same "event" mechanism as run().
+   *
+   * Difference from run(): no .log file is persisted — installs are
+   * ephemeral and do not belong in run history. The runId is still unique
+   * so the UI can filter events to this install.
+   *
+   * Returns the runId. On ENOENT (pip/npm not found, e.g. Python/Node
+   * missing) the exit event carries missingInterpreter so the UI can show
+   * the same download link as a failed run.
+   */
+  installDeps(
+    format: "python" | "nodejs",
+    packages: string[],
+    cwd: string,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS
+  ): string {
+    if (packages.length === 0) {
+      throw new Error("installDeps called with empty package list");
+    }
+    const runId = randomUUID();
+    const startedAt = Date.now();
+
+    // Path safety: cwd must resolve inside the automations dir.
+    const resolvedCwd = path.resolve(cwd);
+    if (!resolvedCwd.startsWith(path.resolve(AUTOMATIONS_DIR))) {
+      throw new Error(`Refusing to install outside automations directory: ${cwd}`);
+    }
+
+    const { bin, args } = pickInstallCommand(format, packages);
+    const child = spawn(bin, args, {
+      cwd: resolvedCwd,
+      env: process.env,
+      shell: false,
+      windowsHide: true,
+    });
+
+    // Lightweight tracking — no log stream. We reuse the run map so kill()
+    // works uniformly, but logFilePath is the empty string.
+    const active: ActiveRun = {
+      runId,
+      child,
+      outputBytes: 0,
+      timeoutHandle: setTimeout(() => {
+        active.killed = true;
+        try { child.kill("SIGKILL"); } catch { /* gone */ }
+        this.emitEvent({
+          runId,
+          type: "output",
+          stream: "stderr",
+          data: `\n[AutomationRunner] Install timeout after ${Math.round(timeoutMs / 1000)}s — aborted.\n`,
+        });
+      }, timeoutMs),
+      killed: false,
+      logFilePath: "",
+      // A no-op write stream keeps the rest of the code uniform.
+      logStream: fs.createWriteStream(require("os").devNull),
+      startedAt,
+      format,
+    };
+    this.runs.set(runId, active);
+
+    const capture = (stream: "stdout" | "stderr") => (chunk: Buffer | string) => {
+      if (active.outputBytes >= MAX_OUTPUT_BYTES) return;
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+      const remaining = MAX_OUTPUT_BYTES - active.outputBytes;
+      const truncated = text.length > remaining ? text.slice(0, remaining) + "\n[... output truncated — cap reached ...]\n" : text;
+      active.outputBytes += truncated.length;
+      this.emitEvent({ runId, type: "output", stream, data: truncated });
+    };
+    child.stdout?.on("data", capture("stdout"));
+    child.stderr?.on("data", capture("stderr"));
+
+    const finalize = (reason: RunEvent["reason"], code: number | null, error?: string) => {
+      clearTimeout(active.timeoutHandle);
+      this.runs.delete(runId);
+      try { active.logStream.end(); } catch { /* no-op */ }
+      const event: RunEvent = { runId, type: "exit", reason, code };
+      if (error) event.error = error;
+      if (reason === "error" && error && /ENOENT/i.test(error)) {
+        event.missingInterpreter = active.format;
+      }
+      this.emitEvent(event);
+    };
+
+    child.on("error", (err) => {
+      finalize("error", null, err instanceof Error ? err.message : String(err));
+    });
+
+    child.on("exit", (code, signal) => {
+      const reason: RunEvent["reason"] = active.killed
+        ? (signal === "SIGKILL" ? "timeout" : "killed")
+        : "completed";
+      finalize(reason, code ?? null);
+    });
+
+    return runId;
+  }
+
+  /**
    * Kill a running process by runId. Returns true if a matching run was
    * found and SIGTERM was sent. SIGKILL is escalated after 2s if still alive.
    */
@@ -241,4 +341,26 @@ function pickCommand(format: "python" | "nodejs"): { bin: string; args: string[]
     return { bin: "python3", args: [] };
   }
   return { bin: "node", args: [] };
+}
+
+/**
+ * Build the platform-correct `pip install` / `npm install` command. Matches
+ * the interpreter conventions used by pickCommand so a user whose `python3`
+ * resolves also has a `python3 -m pip`.
+ */
+function pickInstallCommand(
+  format: "python" | "nodejs",
+  packages: string[]
+): { bin: string; args: string[] } {
+  if (format === "python") {
+    // Use `python -m pip install` rather than calling `pip` directly — this
+    // guarantees we install into the same interpreter we'll run the script
+    // with. A machine with `pip3` pointing at a different Python than
+    // `python3` (not uncommon on macOS) would otherwise break.
+    const bin = process.platform === "win32" ? "python" : "python3";
+    return { bin, args: ["-m", "pip", "install", ...packages] };
+  }
+  // npm install <packages> — goes to the cwd's node_modules, which for us
+  // is ~/flowtracker/automations. So the second Run uses the same modules.
+  return { bin: "npm", args: ["install", ...packages] };
 }

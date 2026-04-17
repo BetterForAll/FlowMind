@@ -1,22 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 import { FlowStore } from "./flow-store";
+import { detectExternalDeps } from "./dep-detector";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type { InterviewQuestion, FlowDocument } from "../types";
-
-// Common Python stdlib / Node builtins — anything else is treated as a third-party dep
-const PYTHON_STDLIB = new Set([
-  "os", "sys", "re", "json", "time", "datetime", "pathlib", "subprocess", "shutil",
-  "random", "math", "collections", "itertools", "functools", "typing", "logging",
-  "argparse", "io", "tempfile", "glob", "csv", "sqlite3", "urllib", "http", "email",
-  "base64", "hashlib", "hmac", "uuid", "threading", "multiprocessing", "asyncio",
-  "concurrent", "queue", "socket", "ssl", "xml", "html", "string", "textwrap", "traceback",
-]);
-const NODE_BUILTINS = new Set([
-  "fs", "path", "os", "crypto", "http", "https", "url", "querystring", "stream",
-  "util", "events", "child_process", "readline", "assert", "buffer", "process",
-  "timers", "zlib", "dns", "net", "tls", "v8", "worker_threads",
-]);
 
 function prependHeader(
   format: string,
@@ -63,8 +50,7 @@ function prependHeader(
 function buildUsageInstructions(format: string, filePath: string, content: string): string {
   switch (format) {
     case "python": {
-      const imports = detectPythonImports(content);
-      const external = imports.filter((i) => !PYTHON_STDLIB.has(i));
+      const external = detectExternalDeps(content, "python");
       const lines = [
         `**How to run this script**`,
         "",
@@ -78,8 +64,7 @@ function buildUsageInstructions(format: string, filePath: string, content: strin
       return lines.join("\n");
     }
     case "nodejs": {
-      const imports = detectNodeImports(content);
-      const external = imports.filter((i) => !NODE_BUILTINS.has(i) && !i.startsWith("."));
+      const external = detectExternalDeps(content, "nodejs");
       const lines = [
         `**How to run this script**`,
         "",
@@ -111,38 +96,6 @@ function buildUsageInstructions(format: string, filePath: string, content: strin
     default:
       return "";
   }
-}
-
-function detectPythonImports(content: string): string[] {
-  const imports = new Set<string>();
-  for (const line of content.split("\n")) {
-    const m1 = line.match(/^\s*import\s+([a-zA-Z_][\w.]*)/);
-    const m2 = line.match(/^\s*from\s+([a-zA-Z_][\w.]*)\s+import/);
-    const name = (m1?.[1] ?? m2?.[1] ?? "").split(".")[0];
-    if (name) imports.add(name);
-  }
-  return Array.from(imports);
-}
-
-function detectNodeImports(content: string): string[] {
-  const imports = new Set<string>();
-  const patterns = [
-    /require\(['"]([^'"]+)['"]\)/g,
-    /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
-    /import\s+['"]([^'"]+)['"]/g,
-  ];
-  for (const pattern of patterns) {
-    let m;
-    while ((m = pattern.exec(content)) !== null) {
-      const raw = m[1];
-      if (!raw.startsWith(".")) {
-        // Strip scoped package path (e.g. @scope/pkg/sub → @scope/pkg)
-        const parts = raw.split("/");
-        imports.add(raw.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]);
-      }
-    }
-  }
-  return Array.from(imports);
 }
 
 const AUTOMATION_PROMPT = `You are FlowMind, an AI that generates automations from documented workflows.
