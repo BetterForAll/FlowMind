@@ -103,6 +103,42 @@ export class FlowStore {
   }
 
   /**
+   * Merge evidence from a newly-detected flow into an existing flow file.
+   * Only frontmatter metadata is updated (occurrences, last_seen, source_windows, apps).
+   * The body is preserved as-is — body refinement is a separate, opt-in step.
+   *
+   * Throws if the target file doesn't exist or can't be parsed.
+   */
+  async mergeFlow(
+    filePath: string,
+    merge: { newSourceWindows?: string[]; newApps?: string[]; now?: string }
+  ): Promise<void> {
+    const raw = await fsp.readFile(filePath, "utf-8");
+    const parsed = this.parseDocument(raw);
+    if (!parsed) throw new Error(`Cannot parse flow file for merge: ${filePath}`);
+
+    const existing = parsed.frontmatter as unknown as FlowFrontmatter;
+    const now = merge.now ?? new Date().toISOString();
+
+    const mergedSourceWindows = Array.from(
+      new Set([...(existing.source_windows ?? []), ...(merge.newSourceWindows ?? [])])
+    );
+    const mergedApps = Array.from(
+      new Set([...(existing.apps ?? []), ...(merge.newApps ?? [])])
+    );
+
+    const updated: FlowFrontmatter = {
+      ...existing,
+      occurrences: (existing.occurrences ?? 1) + 1,
+      last_seen: now,
+      source_windows: mergedSourceWindows,
+      apps: mergedApps,
+    };
+
+    await fsp.writeFile(filePath, this.serializeDocument({ ...updated }, parsed.body), "utf-8");
+  }
+
+  /**
    * Save a generated automation file for a flow.
    * Filename pattern: <flow-slug>-<format>.<ext>
    * Exactly one file per (flow, format) pair. Regeneration overwrites.
