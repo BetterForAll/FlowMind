@@ -1,4 +1,22 @@
-import type { FlowDocument, CaptureStats } from "../../types";
+import type { FlowDocument, CaptureStats, FlowWorth } from "../../types";
+
+/**
+ * Human-readable label and CSS-modifier name for a worth tier. Returns null
+ * when the flow has no worth set (older flows that predate classification),
+ * so callers can decide to render an "Unclassified" affordance or hide it.
+ */
+function worthBadge(worth: FlowWorth | undefined): { label: string; className: string } | null {
+  switch (worth) {
+    case "meaningful":
+      return { label: "Worth automating", className: "worth-meaningful" };
+    case "repeatable-uncertain":
+      return { label: "Full workflow", className: "worth-repeatable-uncertain" };
+    case "partial-with-gaps":
+      return { label: "Needs clarification", className: "worth-partial-with-gaps" };
+    default:
+      return null;
+  }
+}
 
 interface DashboardProps {
   completeFlows: FlowDocument[];
@@ -114,9 +132,22 @@ export function Dashboard({
               >
                 <div className="flow-card-header">
                   <span className="flow-name">{flow.frontmatter.name}</span>
-                  <span className={`flow-badge ${flow.kind}`}>
-                    {flow.kind === "complete" ? "Complete" : "Partial"}
-                  </span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {(() => {
+                      const w = worthBadge(flow.frontmatter.worth);
+                      return w ? (
+                        <span
+                          className={`flow-badge ${w.className}`}
+                          title={flow.frontmatter.worth_reason ?? ""}
+                        >
+                          {w.label}
+                        </span>
+                      ) : null;
+                    })()}
+                    <span className={`flow-badge ${flow.kind}`}>
+                      {flow.kind === "complete" ? "Complete" : "Partial"}
+                    </span>
+                  </div>
                 </div>
                 <div className="flow-meta">
                   <span>
@@ -127,6 +158,11 @@ export function Dashboard({
                     Last seen{" "}
                     {new Date(flow.frontmatter.last_seen).toLocaleString()}
                   </span>
+                  {(flow.frontmatter.time_saved_estimate_minutes ?? 0) > 0 && (
+                    <span style={{ color: "var(--green)" }}>
+                      ~{flow.frontmatter.time_saved_estimate_minutes} min saved if automated
+                    </span>
+                  )}
                 </div>
                 <div style={{ marginTop: 8 }}>
                   {flow.frontmatter.apps.map((app) => (

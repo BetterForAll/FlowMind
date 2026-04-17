@@ -1,6 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
-import type { FlowDocument, InterviewQuestion, AutomationFile } from "../../types";
+import type { FlowDocument, InterviewQuestion, AutomationFile, FlowWorth } from "../../types";
 import type { DescriptionDocument } from "../../engine/description-store";
+
+function worthLabel(worth: FlowWorth | undefined): string {
+  switch (worth) {
+    case "meaningful":         return "Worth automating";
+    case "repeatable-uncertain": return "Full workflow — uncertain automation value";
+    case "partial-with-gaps":  return "Partial workflow — needs clarification";
+    default:                   return "Unclassified";
+  }
+}
 
 function encodePath(p: string): string {
   return `flowmind://file/${encodeURIComponent(p.replace(/\\/g, "/"))}`;
@@ -246,6 +255,49 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           </span>
         ))}
       </div>
+
+      {/* Judge's verdict panel — why this flow was classified the way it was. */}
+      <div className={`worth-panel ${flow.frontmatter.worth ?? "unclassified"}`}>
+        <div className="worth-title">Judge's verdict</div>
+        <div className="worth-verdict">{worthLabel(flow.frontmatter.worth)}</div>
+        {flow.frontmatter.worth_reason && (
+          <div className="worth-reason">{flow.frontmatter.worth_reason}</div>
+        )}
+        {!flow.frontmatter.worth_reason && !flow.frontmatter.worth && (
+          <div className="worth-reason" style={{ color: "var(--text-muted)" }}>
+            This flow predates the classifier. Re-detection with new evidence will score it.
+          </div>
+        )}
+        {(flow.frontmatter.time_saved_estimate_minutes ?? 0) > 0 && (
+          <div className="worth-saved">
+            ~{flow.frontmatter.time_saved_estimate_minutes} min saved per future occurrence if automated
+          </div>
+        )}
+      </div>
+
+      {/* Primary automation shortcuts for complete flows — jump straight to the
+          generated output for the chosen format. The tabbed UI below still
+          provides the full matrix. */}
+      {isComplete && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          <button
+            className="btn btn-primary"
+            onClick={() => generateAutomation("claude-skill", !!automationsByFormat["claude-skill"])}
+            disabled={generating}
+            title="Generate a Claude Code skill you can invoke as a slash command"
+          >
+            {generating ? "Working..." : (automationsByFormat["claude-skill"] ? "Re-Automate (Claude Skill)" : "Automate")}
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => generateAutomation("python", !!automationsByFormat["python"])}
+            disabled={generating}
+            title="Generate a runnable Python script for this workflow"
+          >
+            {generating ? "Working..." : (automationsByFormat["python"] ? "Re-Create script (Python)" : "Create script")}
+          </button>
+        </div>
+      )}
 
       <div className="detail-body">{flow.body}</div>
 

@@ -195,6 +195,44 @@ body {
 .flow-badge.partial { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
 .flow-badge.knowledge { background: rgba(129, 140, 248, 0.15); color: var(--accent); }
 
+/* Worth tier badges — surfaced by WorthJudge classification. */
+.flow-badge.worth-meaningful { background: rgba(52, 211, 153, 0.18); color: var(--green); border: 1px solid rgba(52, 211, 153, 0.35); }
+.flow-badge.worth-repeatable-uncertain { background: rgba(148, 163, 184, 0.15); color: var(--text-muted); border: 1px solid rgba(148, 163, 184, 0.25); }
+.flow-badge.worth-partial-with-gaps { background: rgba(251, 191, 36, 0.15); color: var(--yellow); border: 1px solid rgba(251, 191, 36, 0.25); }
+.flow-badge.worth-unclassified { background: rgba(148, 163, 184, 0.08); color: var(--text-muted); border: 1px dashed rgba(148, 163, 184, 0.3); }
+
+/* Judge verdict panel on the flow-detail page. */
+.worth-panel {
+  margin: 16px 0 20px;
+  padding: 14px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-hover);
+}
+.worth-panel.meaningful { border-left: 3px solid var(--green); }
+.worth-panel.repeatable-uncertain { border-left: 3px solid var(--text-muted); }
+.worth-panel.partial-with-gaps { border-left: 3px solid var(--yellow); }
+.worth-panel .worth-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.worth-panel .worth-verdict { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.worth-panel .worth-reason { font-size: 14px; color: var(--text); line-height: 1.5; }
+.worth-panel .worth-saved {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .flow-meta {
   font-size: 12px;
   color: var(--text-muted);
