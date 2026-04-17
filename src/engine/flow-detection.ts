@@ -466,6 +466,10 @@ export class FlowDetectionEngine {
               apps: mergedApps,
               occurrences: postMergeOccurrences,
               avgDurationMinutes: flow.avg_duration_minutes,
+              decisionLogic: flow.decision_logic,
+              toolsAndData: flow.tools_and_data,
+              automationClassification: flow.automation_classification,
+              variations: flow.variations,
             },
             detectionModel
           );
@@ -500,6 +504,10 @@ export class FlowDetectionEngine {
           apps: mergedApps,
           occurrences: 1,
           avgDurationMinutes: flow.avg_duration_minutes,
+          decisionLogic: flow.decision_logic,
+          toolsAndData: flow.tools_and_data,
+          automationClassification: flow.automation_classification,
+          variations: flow.variations,
         },
         detectionModel
       );

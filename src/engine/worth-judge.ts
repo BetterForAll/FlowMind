@@ -2,15 +2,16 @@ import { GoogleGenAI } from "@google/genai";
 import type { FlowWorth } from "../types";
 
 /**
- * A flow summary tailored for the worth classifier. Kept compact on purpose —
- * the judge shouldn't need full markdown to decide if an activity is a
- * meaningful workflow.
+ * Full flow description fed to the worth judge. The judge is the hardest,
+ * most value-dense decision in the pipeline — deciding whether an observed
+ * activity is a meaningful automatable workflow versus noise dressed up as a
+ * pattern. So we feed it the full detailed output of phase 2, not a summary.
  */
 export interface FlowForJudgment {
   type: "complete-flow" | "partial-flow";
   name: string;
   trigger: string;
-  /** Raw steps markdown. Truncated by the judge if long. */
+  /** Full steps markdown from phase 2. NOT truncated — the judge needs it all. */
   steps: string;
   apps: string[];
   occurrences: number;
@@ -18,6 +19,14 @@ export interface FlowForJudgment {
   avgDurationMinutes?: number;
   /** Number of interview gaps remaining, if this is a partial flow. */
   gaps?: number;
+  /** Optional — full decision-logic markdown from phase 2 if available. */
+  decisionLogic?: string;
+  /** Optional — full tools/data-sources markdown from phase 2 if available. */
+  toolsAndData?: string;
+  /** Optional — full automation-classification markdown from phase 2 if available. */
+  automationClassification?: string;
+  /** Optional — full variations markdown from phase 2 if available. */
+  variations?: string;
 }
 
 export interface WorthVerdict {
@@ -26,33 +35,34 @@ export interface WorthVerdict {
   time_saved_estimate_minutes: number;
 }
 
-const WORTH_PROMPT = `You are FlowMind's worth judge. You look at a detected workflow and decide whether it is meaningful enough to automate, or whether it is just noise that happens to look like a pattern.
+const WORTH_PROMPT = `You are FlowMind's worth judge. You are the most important classifier in the pipeline — everything downstream depends on your verdict. Your job is to decide whether a detected workflow is genuinely meaningful (worth automating / worth the user's interview time) or whether it is noise dressed up as a pattern.
+
+Work through these five signals deliberately BEFORE arriving at a tier. You may think out loud internally — use your reasoning budget — but emit only the final JSON.
+
+Signal 1 — Goal-directedness. Does the activity have an identifiable goal the user is trying to accomplish, or is it just "being active on the computer"? Saving a specific article with a specific filename to a specific folder = goal. Clicking between YouTube videos without any apparent purpose = no goal.
+
+Signal 2 — Trigger concreteness. Is the trigger a specific circumstance that would recur ("when the user wants to save an article for later", "after finishing a meeting"), or is it vague ("sometimes"), or absent? A real workflow has a reproducible trigger, not an arbitrary one.
+
+Signal 3 — Outcome concreteness. Does the activity produce a concrete, observable outcome (a file saved, a message sent, a form submitted, a calendar event created)? Or does it just end with the user moving on to something else? Noise has no outcome — or a trivial one like "the user closed the browser".
+
+Signal 4 — Step structure. Do the steps form a recognizable sequence with clear dependencies (step B requires step A's output), or is it an arbitrary ordering of app-switches and clicks? Real workflows have structure. Noise is a list of disconnected actions.
+
+Signal 5 — Repeatability. Is this something the user would plausibly do again? Signals of repeatability include: a routine nature (daily, weekly), a transferable shape (same structure with different content), a useful enough outcome that the user would want it again. One-off situational activity is not repeatable.
 
 Assign one of these tiers:
 
-- "noise": NOT a repeatable workflow. Examples: user jumping between unrelated YouTube videos, scrolling news, opening and closing apps without producing a concrete outcome, idle browsing. These should not be saved as flows. A window of activity without a trigger-to-outcome shape is noise.
-- "partial-with-gaps": a workflow shape is visible but some steps, decisions, or outcomes are unclear. The flow has unanswered gap questions that need clarification before it can be reliably reproduced or automated.
-- "repeatable-uncertain": reproducible steps with a clear outcome, but the automation payoff is uncertain. Either the steps are simple enough to do manually, the trigger is not routine, or the user's intent is unclear. Might still be useful, but not a top automation candidate.
-- "meaningful": a clear trigger, reproducible steps, a concrete outcome, and a plausible reason to believe this will recur. These are the prime automation candidates.
+- "noise": FAILS on goal-directedness or outcome-concreteness or repeatability. Not a workflow. Examples: jumping between unrelated YouTube videos, general browsing/scrolling without an outcome, opening and closing apps without producing anything, idle behavior. These must NOT be saved.
+- "partial-with-gaps": workflow SHAPE is visible (goal, rough steps) but some critical steps, decisions, or the outcome are unclear. Has open interview questions. Cannot yet be reliably reproduced.
+- "repeatable-uncertain": reproducible steps with a clear outcome, but the automation payoff is uncertain — either the steps are trivial to do manually (not worth automating), the trigger is not routine (unlikely to recur often), or the user's real intent is unclear from the observations. Save the flow but do not promote it as a top candidate.
+- "meaningful": passes every signal. Clear goal, concrete trigger, concrete outcome, structured steps, plausible repeatability. Prime automation candidate. These are the flows the user should see first and the flows worth generating automations for.
 
-A flow IS meaningful when:
-- it has a concrete trigger ("when the user wants to save an article for later")
-- it has a concrete outcome ("a file named after the article is saved to a topic folder")
-- steps follow a recognizable, reproducible sequence
-- it is plausibly repeatable — something the user would do more than once
+Be HONEST. If the flow is noise, say noise — don't inflate to "repeatable-uncertain" to be nice. The downstream UI hides noise; inflating it pollutes the flow library.
 
-A flow IS NOT meaningful (noise) when:
-- it is just browsing or jumping between apps with no outcome
-- it is a one-off, situational activity unlikely to recur
-- there is no identifiable goal beyond "the user was active on the computer"
+Respond with ONLY valid JSON. The \`worth_reason\` must be ONE sentence that names the single strongest signal driving your verdict — not a description of the flow and not a hedge.
 
-Also provide:
-- A one-sentence \`worth_reason\` explaining the tier.
-
-Respond with ONLY valid JSON:
 {
   "worth": "noise" | "partial-with-gaps" | "repeatable-uncertain" | "meaningful",
-  "worth_reason": "One sentence."
+  "worth_reason": "One sentence naming the dominant signal."
 }`;
 
 export class WorthJudge {
@@ -98,32 +108,52 @@ export class WorthJudge {
   }
 
   private async callGemini(flow: FlowForJudgment, model: string): Promise<Omit<WorthVerdict, "time_saved_estimate_minutes">> {
-    const compactSteps = flow.steps.replace(/\s+/g, " ").trim().slice(0, 1200);
     const duration = flow.avgDurationMinutes != null ? `${flow.avgDurationMinutes} min` : "unknown";
 
-    const prompt = `${WORTH_PROMPT}
+    const sections: string[] = [
+      `## Flow to evaluate`,
+      ``,
+      `- name: ${flow.name}`,
+      `- type: ${flow.type}`,
+      `- trigger: ${flow.trigger || "(none given)"}`,
+      `- apps: [${flow.apps.join(", ")}]`,
+      `- occurrences observed: ${flow.occurrences}`,
+      `- avg duration per occurrence: ${duration}`,
+      ``,
+      `### Steps`,
+      flow.steps || "(none)",
+    ];
+    if (flow.decisionLogic) {
+      sections.push(``, `### Decision logic`, flow.decisionLogic);
+    }
+    if (flow.toolsAndData) {
+      sections.push(``, `### Tools & data sources`, flow.toolsAndData);
+    }
+    if (flow.automationClassification) {
+      sections.push(``, `### Automation classification (from phase 2)`, flow.automationClassification);
+    }
+    if (flow.variations) {
+      sections.push(``, `### Variations observed`, flow.variations);
+    }
 
-## Flow to evaluate
-
-- name: ${flow.name}
-- type: ${flow.type}
-- trigger: ${flow.trigger || "(none given)"}
-- apps: [${flow.apps.join(", ")}]
-- occurrences observed: ${flow.occurrences}
-- avg duration: ${duration}
-- steps: ${compactSteps}
-`;
+    const prompt = `${WORTH_PROMPT}\n\n${sections.join("\n")}\n`;
 
     const apiCall = this.genai.models.generateContent({
       model,
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: { responseMimeType: "application/json" },
+      config: {
+        responseMimeType: "application/json",
+        // Worth judgment is the hardest call in the pipeline — a shallow verdict
+        // defeats the point of classification. Always give the model reasoning
+        // budget, regardless of the capture mode's default thinking setting.
+        thinkingConfig: { thinkingBudget: 8192 },
+      },
     });
 
     const response = await Promise.race([
       apiCall,
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("WorthJudge timed out after 45s")), 45_000)
+        setTimeout(() => reject(new Error("WorthJudge timed out after 90s")), 90_000)
       ),
     ]);
 
