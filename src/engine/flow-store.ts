@@ -171,9 +171,10 @@ export class FlowStore {
 
   /**
    * Merge evidence from a newly-detected flow into an existing flow file.
-   * Only frontmatter metadata is updated (occurrences, last_seen,
-   * source_windows, apps, and optionally the worth fields). The body is
-   * preserved as-is — body refinement is a separate, opt-in step.
+   * Metadata always updates (occurrences, last_seen, source_windows, apps,
+   * and optionally worth). The body is replaced only if a `newBody` is
+   * supplied — callers can pass a BodyRefiner-produced consolidated body
+   * here. Omitting `newBody` preserves the existing body unchanged.
    *
    * If `worth` is supplied, it overwrites any existing worth fields so the
    * classification reflects the freshly-merged state (new occurrence count,
@@ -190,6 +191,7 @@ export class FlowStore {
       worth?: FlowFrontmatter["worth"];
       worth_reason?: string;
       time_saved_estimate_minutes?: number;
+      newBody?: string;
     }
   ): Promise<void> {
     const raw = await fsp.readFile(filePath, "utf-8");
@@ -219,7 +221,8 @@ export class FlowStore {
         : {}),
     };
 
-    await fsp.writeFile(filePath, this.serializeDocument({ ...updated }, parsed.body), "utf-8");
+    const bodyToWrite = merge.newBody ?? parsed.body;
+    await fsp.writeFile(filePath, this.serializeDocument({ ...updated }, bodyToWrite), "utf-8");
   }
 
   /**

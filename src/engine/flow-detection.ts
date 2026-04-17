@@ -8,6 +8,7 @@ import { FlowEvaluator, type NewlyDetectedFlow } from "./evaluator";
 import { WorthJudge, type FlowForJudgment, type WorthVerdict } from "./worth-judge";
 import { GapCloser, extractQuestions, insertAnswersAndRewriteQuestions } from "./gap-closer";
 import { PartialElevator } from "./partial-elevator";
+import { BodyRefiner } from "./body-refiner";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
@@ -109,6 +110,7 @@ export class FlowDetectionEngine {
   private worthJudge: WorthJudge;
   private gapCloser: GapCloser;
   private partialElevator: PartialElevator;
+  private bodyRefiner: BodyRefiner;
   private running = false;
 
   constructor(store: FlowStore, descriptionStore: DescriptionStore) {
@@ -124,6 +126,7 @@ export class FlowDetectionEngine {
     this.worthJudge = new WorthJudge();
     this.gapCloser = new GapCloser();
     this.partialElevator = new PartialElevator();
+    this.bodyRefiner = new BodyRefiner();
   }
 
   isRunning(): boolean {
@@ -514,6 +517,22 @@ export class FlowDetectionEngine {
             console.log(`[WorthJudge] Dropped merge into "${target.frontmatter.name}" — classified as noise: ${verdict.worth_reason}`);
             continue;
           }
+          // Reconcile the existing stored body with the new observation so
+          // merges don't leave the body stale. The refiner is lossless on
+          // failure (returns the existing body unchanged).
+          const refinedBody = await this.bodyRefiner.refine(
+            target.body,
+            {
+              name: flow.name,
+              trigger: flow.trigger,
+              steps: flow.steps,
+              decision_logic: flow.decision_logic,
+              tools_and_data: flow.tools_and_data,
+              automation_classification: flow.automation_classification,
+              variations: flow.variations,
+            },
+            detectionModel
+          );
           await this.store.mergeFlow(target.filePath, {
             newSourceWindows: mergedWindows,
             newApps: mergedApps,
@@ -521,10 +540,12 @@ export class FlowDetectionEngine {
             worth: verdict.worth,
             worth_reason: verdict.worth_reason,
             time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
+            newBody: refinedBody === target.body ? undefined : refinedBody,
           });
           result.updatedComplete++;
           result.filesWritten.push(target.filePath);
-          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason}); worth=${verdict.worth}`);
+          const bodyNote = refinedBody === target.body ? "body unchanged" : "body refined";
+          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason}); worth=${verdict.worth}; ${bodyNote}`);
           continue;
         }
         // Fallthrough: matchedFlowId didn't resolve — save as new (defensive; evaluator should have filtered this).
