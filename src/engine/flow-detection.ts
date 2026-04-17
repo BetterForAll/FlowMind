@@ -4,10 +4,13 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { FlowStore } from "./flow-store";
 import { DescriptionStore, type DescriptionDocument } from "./description-store";
+import { FlowEvaluator, type NewlyDetectedFlow } from "./evaluator";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
   DetectionResult,
+  EvaluatorResult,
+  FlowDocument,
   FlowFrontmatter,
   KnowledgeFrontmatter,
 } from "../types";
@@ -96,6 +99,7 @@ export class FlowDetectionEngine {
   private store: FlowStore;
   private descriptionStore: DescriptionStore;
   private genai: GoogleGenAI;
+  private evaluator: FlowEvaluator;
   private running = false;
 
   constructor(store: FlowStore, descriptionStore: DescriptionStore) {
@@ -107,6 +111,7 @@ export class FlowDetectionEngine {
       throw new Error("GEMINI_API_KEY environment variable is required");
     }
     this.genai = new GoogleGenAI({ apiKey });
+    this.evaluator = new FlowEvaluator();
   }
 
   isRunning(): boolean {
@@ -145,14 +150,37 @@ export class FlowDetectionEngine {
       // 3. Single Gemini call (text + key screenshots only)
       const analysis = await this.analyzeWithGemini(settings.detectionModel, windowParts, settings.thinking);
 
-      // 4. Save results (flows + knowledge), filtering source_windows to only real citations
-      const validWindowStarts = new Set(descriptions.map((d) => d.frontmatter.windowStart));
-      const result = await this.saveResults(analysis, validWindowStarts);
+      // 4. Evaluator pass — decide per newly-detected complete flow whether to
+      //    save as new or merge into an existing flow. Also collapse any
+      //    within-run duplicates. The evaluator has its own failure-isolation
+      //    fallback (returns "all new" on error).
+      const { complete: existingCompleteFlows } = await this.store.getAllFlows();
+      const newlyDetected: NewlyDetectedFlow[] = (analysis.complete_flows ?? []).map((f) => ({
+        name: f.name,
+        trigger: f.trigger,
+        apps: f.apps,
+        stepsSummary: summarizeStepsForEvaluator(f.steps),
+      }));
+      const decisions = await this.evaluator.evaluate(
+        newlyDetected,
+        existingCompleteFlows,
+        settings.detectionModel
+      );
+      logEvaluatorSummary(decisions);
 
-      // 5. Mark descriptions as analyzed
+      // 5. Save results (flows + knowledge), filtering source_windows to only real citations
+      const validWindowStarts = new Set(descriptions.map((d) => d.frontmatter.windowStart));
+      const result = await this.saveResults(
+        analysis,
+        validWindowStarts,
+        decisions,
+        existingCompleteFlows
+      );
+
+      // 6. Mark descriptions as analyzed
       await this.descriptionStore.markAnalyzed(descriptions.map((d) => d.filePath));
 
-      // 6. Link contributing descriptions so they survive age-based cleanup
+      // 7. Link contributing descriptions so they survive age-based cleanup
       const cited = new Set<string>();
       for (const f of analysis.complete_flows ?? []) (f.source_windows ?? []).forEach((w) => cited.add(w));
       for (const f of analysis.partial_flows ?? []) (f.source_windows ?? []).forEach((w) => cited.add(w));
@@ -262,7 +290,9 @@ export class FlowDetectionEngine {
 
   private async saveResults(
     analysis: GeminiAnalysis,
-    validWindowStarts: Set<string>
+    validWindowStarts: Set<string>,
+    decisions: EvaluatorResult,
+    existingCompleteFlows: FlowDocument[]
   ): Promise<DetectionResult> {
     const filterCitations = (ws?: string[]): string[] =>
       (ws ?? []).filter((w) => validWindowStarts.has(w));
@@ -276,8 +306,53 @@ export class FlowDetectionEngine {
     };
 
     const now = new Date().toISOString();
+    const completeFlows = analysis.complete_flows ?? [];
+    const existingById = new Map(existingCompleteFlows.map((f) => [f.frontmatter.id, f]));
 
-    for (const flow of analysis.complete_flows ?? []) {
+    // Resolve within-run duplicates — collapse B into A, carrying source_windows
+    // and apps forward so the survivor keeps all the evidence.
+    const survivorOf = resolveWithinRunDupes(completeFlows.length, decisions.withinRunDupes);
+    const carried: { sourceWindows: Set<string>; apps: Set<string> }[] =
+      completeFlows.map(() => ({ sourceWindows: new Set(), apps: new Set() }));
+    for (let i = 0; i < completeFlows.length; i++) {
+      const survivor = survivorOf[i];
+      if (survivor === i) continue;
+      // i was collapsed into survivor — push i's evidence onto survivor's carry set
+      for (const w of filterCitations(completeFlows[i].source_windows)) carried[survivor].sourceWindows.add(w);
+      for (const a of completeFlows[i].apps ?? []) carried[survivor].apps.add(a);
+    }
+
+    // Build quick lookup from index → decision (for survivors).
+    const decisionByIndex = new Map(decisions.complete.map((d) => [d.index, d]));
+
+    for (let i = 0; i < completeFlows.length; i++) {
+      if (survivorOf[i] !== i) continue; // collapsed dupes are not saved separately
+      const flow = completeFlows[i];
+      const decision = decisionByIndex.get(i);
+
+      // Union cited source_windows with any carried from collapsed within-run dupes.
+      const mergedWindows = Array.from(
+        new Set([...filterCitations(flow.source_windows), ...carried[i].sourceWindows])
+      );
+      const mergedApps = Array.from(new Set([...(flow.apps ?? []), ...carried[i].apps]));
+
+      if (decision?.kind === "merge" && decision.matchedFlowId) {
+        const target = existingById.get(decision.matchedFlowId);
+        if (target) {
+          await this.store.mergeFlow(target.filePath, {
+            newSourceWindows: mergedWindows,
+            newApps: mergedApps,
+            now,
+          });
+          result.updatedComplete++;
+          result.filesWritten.push(target.filePath);
+          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason})`);
+          continue;
+        }
+        // Fallthrough: matchedFlowId didn't resolve — save as new (defensive; evaluator should have filtered this).
+        console.warn(`[Detection] Evaluator returned merge with unresolved id ${decision.matchedFlowId}; saving as new`);
+      }
+
       const frontmatter: FlowFrontmatter = {
         type: "complete-flow",
         id: `flow-${uuid()}`,
@@ -288,8 +363,8 @@ export class FlowDetectionEngine {
         confidence: flow.confidence as "high" | "medium",
         avg_duration: flow.avg_duration_minutes,
         trigger: flow.trigger,
-        apps: flow.apps,
-        source_windows: filterCitations(flow.source_windows),
+        apps: mergedApps,
+        source_windows: mergedWindows,
       };
 
       const body = `# ${flow.name}
@@ -382,6 +457,63 @@ ${k.related_flows.map((r) => `- ${r}`).join("\n") || "- None yet"}`;
 
     return result;
   }
+}
+
+/**
+ * Union-find over within-run duplicate pairs. Returns an array where result[i]
+ * is the index of the surviving flow that index i should collapse into.
+ * Survivors have result[i] === i.
+ *
+ * The survivor for any connected component is always the minimum index, so the
+ * first-occurring flow in that run is the one kept.
+ */
+function resolveWithinRunDupes(
+  count: number,
+  pairs: { indexA: number; indexB: number }[]
+): number[] {
+  const parent = Array.from({ length: count }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) return;
+    // Point the larger-rooted component at the smaller index — this keeps the
+    // earliest-index flow as the canonical survivor for its component.
+    if (ra < rb) parent[rb] = ra;
+    else parent[ra] = rb;
+  };
+  for (const { indexA, indexB } of pairs) {
+    if (indexA < 0 || indexA >= count || indexB < 0 || indexB >= count) continue;
+    union(indexA, indexB);
+  }
+  return Array.from({ length: count }, (_, i) => find(i));
+}
+
+/** Short, uniform log summary of what the evaluator decided. */
+function logEvaluatorSummary(decisions: EvaluatorResult): void {
+  const merges = decisions.complete.filter((d) => d.kind === "merge").length;
+  const news = decisions.complete.length - merges;
+  const dupes = decisions.withinRunDupes.length;
+  console.log(`[Evaluator] ${decisions.complete.length} complete flows evaluated: ${news} new, ${merges} merge, ${dupes} within-run dupes`);
+  for (const d of decisions.complete) {
+    if (d.kind === "merge") {
+      console.log(`[Evaluator]   merge #${d.index} → ${d.matchedFlowId} — ${d.reason}`);
+    }
+  }
+  for (const d of decisions.withinRunDupes) {
+    console.log(`[Evaluator]   within-run dupe #${d.indexA} & #${d.indexB} — ${d.reason}`);
+  }
+}
+
+/** Compact the model's `steps` markdown into a short line for the evaluator prompt. */
+function summarizeStepsForEvaluator(steps: string): string {
+  const compact = (steps ?? "").replace(/\s+/g, " ").trim();
+  return compact.length > 400 ? compact.slice(0, 400) + "…" : compact;
 }
 
 interface GeminiAnalysis {
