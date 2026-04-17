@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { FlowDocument, InterviewQuestion, AutomationFile, FlowWorth, FlowParameter } from "../../types";
 import type { DescriptionDocument } from "../../engine/description-store";
 import type { RunLogEntry } from "../../engine/flow-store";
@@ -84,6 +84,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   // External (non-stdlib / non-builtin) deps detected in each format's script.
   const [externalDeps, setExternalDeps] = useState<Record<string, string[]>>({});
   const [stdinDraft, setStdinDraft] = useState("");
+  const stdinInputRef = useRef<HTMLInputElement>(null);
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -174,6 +175,20 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       if (a) reloadExternalDeps(a.filePath, activeTab);
     }
   }, [flow, activeTab, automationsByFormat, reloadLogsForFormat, reloadExternalDeps]);
+
+  // Explicit focus management for the stdin input. `autoFocus` alone isn't
+  // enough — it only fires on first mount, and anything that steals focus
+  // (confirm dialog, clicking output, clicking Send) permanently pulls focus
+  // away, leaving the user typing into nothing. This effect refocuses the
+  // input whenever the run transitions into "running" state.
+  useEffect(() => {
+    if (runStatus === "running" && activeRun?.kind === "run") {
+      // Small delay lets the input render before we focus it — without the
+      // delay the ref can still be null when the effect fires.
+      const id = setTimeout(() => stdinInputRef.current?.focus(), 0);
+      return () => clearTimeout(id);
+    }
+  }, [runStatus, activeRun]);
 
   // Subscribe to automation run events once on mount.
   useEffect(() => {
@@ -352,6 +367,9 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     } catch (err) {
       console.error("Send input failed:", err);
     }
+    // Refocus the input so the user can keep typing consecutive answers
+    // without having to click back in between.
+    stdinInputRef.current?.focus();
   };
 
   const closeStdin = async () => {
@@ -939,6 +957,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       >
                         <span style={{ color: "var(--text-muted)", fontFamily: "monospace", fontSize: 12, lineHeight: "28px" }}>&gt;</span>
                         <input
+                          ref={stdinInputRef}
                           type="text"
                           value={stdinDraft}
                           onChange={(e) => setStdinDraft(e.target.value)}
@@ -959,7 +978,6 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                             fontFamily: "monospace",
                             fontSize: 12,
                           }}
-                          autoFocus
                         />
                         <button
                           className="btn btn-secondary"
