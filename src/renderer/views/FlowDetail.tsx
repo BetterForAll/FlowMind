@@ -300,7 +300,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       reason: string;
       attempt: number;
     }
-    type Ev = AutoFixPending | AutoFixRetryStarted | AutoFixFailed;
+    interface AutoFixPromoted {
+      type: "auto_fix_promoted";
+      patchPath: string;
+      primaryPath: string;
+      attempt: number;
+    }
+    type Ev = AutoFixPending | AutoFixRetryStarted | AutoFixFailed | AutoFixPromoted;
 
     const unsubscribe = window.flowmind.onAutoFixEvent((raw: unknown) => {
       const ev = raw as Ev;
@@ -363,9 +369,26 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         ]);
         return;
       }
+      if (ev.type === "auto_fix_promoted") {
+        // The patch has become the new primary — clear the patchPath so
+        // the "Promote patch" button hides, and reload the automations
+        // list so the UI reads the fresh primary contents on next view.
+        setAutoFixState((prev) => ({ ...prev, patchPath: null }));
+        setRunOutput((prevOut) => [
+          ...prevOut,
+          {
+            stream: "stdout",
+            data: `\n[auto-fix] Patch promoted to primary: ${ev.primaryPath}\n[auto-fix] Next Run starts from the fixed version.\n`,
+          },
+        ]);
+        if (flow?.frontmatter.name) {
+          loadAutomations(flow.frontmatter.name);
+        }
+        return;
+      }
     });
     return unsubscribe;
-  }, []);
+  }, [flow, loadAutomations]);
 
   const viewLog = async (entry: RunLogEntry) => {
     try {

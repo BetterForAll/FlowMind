@@ -38,7 +38,16 @@ export type AutoFixEvent =
       patchPath: string;
       previousError: string;
     }
-  | { type: "auto_fix_failed"; runId: string; reason: string; attempt: number };
+  | { type: "auto_fix_failed"; runId: string; reason: string; attempt: number }
+  | {
+      /** A patched script succeeded and was automatically promoted to the
+       *  primary slot. The UI should reload its automations list so the
+       *  primary file reflects the new contents. */
+      type: "auto_fix_promoted";
+      patchPath: string;
+      primaryPath: string;
+      attempt: number;
+    };
 
 interface TrackedRun {
   flowId: string;
@@ -132,6 +141,24 @@ export class AutoFixOrchestrator extends EventEmitter {
       // to reference this tracked record to chain into a retry. We untrack
       // inside the async handler below, or immediately if we're done.
       if (!shouldFix) {
+        // Auto-promote: a successful retry of a patched script means the
+        // primary is broken and the patch works. Overwrite the primary with
+        // the patch so the NEXT Run starts from the fixed version instead
+        // of re-burning LLM calls to regenerate the same patch. Only fires
+        // when the succeeded run was an auto-fix retry (attempt > 1),
+        // which implies tracked.filePath points at a patch file.
+        if (
+          ev.reason === "completed" &&
+          (ev.code ?? 0) === 0 &&
+          tracked.attempt > 1
+        ) {
+          this.tryAutoPromote(tracked).catch((err) => {
+            console.warn(
+              "[AutoFix] auto-promote failed:",
+              err instanceof Error ? err.message : err
+            );
+          });
+        }
         this.runs.delete(ev.runId);
         return;
       }
@@ -315,6 +342,28 @@ export class AutoFixOrchestrator extends EventEmitter {
 
     // Old run is now fully handled.
     this.runs.delete(runId);
+  }
+
+  /**
+   * Copy a patched script's contents into the primary slot and delete the
+   * patch. Fires after a retry run has exited cleanly (exit 0). The next
+   * user-initiated Run will then start from the fixed version — no further
+   * LLM calls needed for the case that just got solved.
+   */
+  private async tryAutoPromote(tracked: TrackedRun): Promise<void> {
+    // Defensive: the tracked filePath for a retry is a patch path
+    // (<slug>-<format>.v<N>.<ext>). Only promote if the basename actually
+    // matches that pattern — guards against a caller that accidentally
+    // registers a non-retry run with attempt > 1.
+    if (!/\.v\d+\.[a-z0-9]+$/i.test(tracked.filePath)) return;
+
+    const primaryPath = await this.store.promotePatchToPrimary(tracked.filePath);
+    this.emit("event", {
+      type: "auto_fix_promoted",
+      patchPath: tracked.filePath,
+      primaryPath,
+      attempt: tracked.attempt,
+    } satisfies AutoFixEvent);
   }
 }
 
