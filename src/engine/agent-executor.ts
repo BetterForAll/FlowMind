@@ -5,6 +5,8 @@ import type { FlowDocument } from "../types";
 import type { AgentEvent, Tool, ToolContext, TraceStep } from "./agent-types";
 import { CORE_TOOLS } from "./agent-tools";
 import { BROWSER_TOOLS, closeBrowserSession, getOrCreateBrowser } from "./agent-browser";
+import { DESKTOP_TOOLS, closeDesktopSession } from "./agent-desktop";
+import { createVisionLocateTool } from "./agent-vision";
 
 /**
  * Agent-first execution — the "live" runner. Instead of generating a
@@ -61,6 +63,17 @@ export interface AgentRunInput {
   /** Optional runId — if omitted, generated here. Used so the caller
    *  can hand it to the UI before the agent starts emitting events. */
   runId?: string;
+  /** Tool tier the agent has access to:
+   *   - 1 (default): filesystem, HTTP, subprocess, browser (Playwright)
+   *   - 2: everything in 1 PLUS desktop UI Automation + vision_locate
+   *
+   * Level 2 is opt-in because desktop control can be destructive. The UI
+   * surfaces it as the "Run with All Tools" button. */
+  level?: 1 | 2;
+  /** When true, Level 2 tool calls pause and ask the user to approve
+   *  before executing. Has no effect at Level 1 (no destructive tools).
+   *  Surfaced as a checkbox in the agent-mode UI. */
+  approveEachStep?: boolean;
 }
 
 export interface AgentRunResult {
@@ -85,12 +98,33 @@ export class AgentExecutor extends EventEmitter {
     this.genai = new GoogleGenAI({ apiKey });
   }
 
-  /** All registered tools — union of core + browser. Built once per
-   *  executor instance so function declarations are only instantiated
-   *  once per session. */
-  private get tools(): Record<string, Tool> {
-    return { ...CORE_TOOLS, ...BROWSER_TOOLS };
+  /**
+   * Build the tool registry for a given level. Stage 3 adds desktop +
+   * vision tools when level=2; the executor calls this once per run so
+   * a single AgentExecutor instance can serve runs at either level
+   * without leaking declarations between them.
+   */
+  private buildToolRegistry(level: 1 | 2, model: string): Record<string, Tool> {
+    const base = { ...CORE_TOOLS, ...BROWSER_TOOLS };
+    if (level < 2) return base;
+    // Vision needs the model name so it can call the same multimodal
+    // endpoint the executor uses; instantiated per-run for isolation.
+    return { ...base, ...DESKTOP_TOOLS, vision_locate: createVisionLocateTool(model) };
   }
+
+  /** Tool names whose effects could damage the user's machine — every
+   *  call to one of these is gated behind the approve-each-step prompt
+   *  when that mode is on. Pure-read tools (window_list, screen_screenshot)
+   *  are intentionally NOT in this list — pausing on every screenshot
+   *  would make the agent unusable. */
+  private static readonly DESTRUCTIVE_TOOLS = new Set([
+    "control_click",
+    "control_type",
+    "keyboard_send",
+    "mouse_click_at",
+    "app_launch",
+    "window_focus",
+  ]);
 
   /**
    * Run the agent against a flow. Emits `agent_*` events along the way
@@ -102,6 +136,8 @@ export class AgentExecutor extends EventEmitter {
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const runId = input.runId ?? randomUUID();
     const trace: TraceStep[] = [];
+    const level: 1 | 2 = input.level ?? 1;
+    const approveEachStep = !!input.approveEachStep;
 
     this.emitEvent({ type: "agent_started", runId, flowId: input.flow.frontmatter.id });
 
@@ -113,13 +149,15 @@ export class AgentExecutor extends EventEmitter {
       getBrowser: () => getOrCreateBrowser(),
     };
 
+    const tools = this.buildToolRegistry(level, input.model);
+
     // Function declarations handed to Gemini. Rebuilt once at the start
     // of every run (cheap — they're just objects). Cast through unknown
     // because our ToolDeclaration.properties is typed as Record<string,
     // unknown> (we don't mirror the full @google/genai Schema type in the
     // tool definitions to keep them readable) — Gemini's schema at this
     // depth is structurally compatible.
-    const functionDeclarations = Object.values(this.tools).map(
+    const functionDeclarations = Object.values(tools).map(
       (t) => t.declaration
     ) as unknown as import("@google/genai").FunctionDeclaration[];
 
@@ -179,7 +217,7 @@ export class AgentExecutor extends EventEmitter {
           const args = (call.args ?? {}) as Record<string, unknown>;
           this.emitEvent({ type: "agent_step_started", runId, index, name, args });
 
-          const tool = this.tools[name];
+          const tool = tools[name];
           const startedAt = Date.now();
           let result: Record<string, unknown>;
           let error: string | undefined;
@@ -188,13 +226,48 @@ export class AgentExecutor extends EventEmitter {
             error = `Unknown tool: ${name}`;
             result = { error };
           } else {
-            try {
-              result = await tool.invoke(args, ctx);
-              consecutiveErrors = 0;
-            } catch (err) {
-              error = err instanceof Error ? err.message : String(err);
-              result = { error };
-              consecutiveErrors++;
+            // Approval gate: when approveEachStep is on AND the tool is
+            // in the destructive set, ask the user before executing.
+            // Read tools (window_list, screenshot, etc.) skip the gate
+            // — pausing on every screen capture would make the agent
+            // unusable.
+            let approvalDenied = false;
+            if (
+              approveEachStep &&
+              AgentExecutor.DESTRUCTIVE_TOOLS.has(name)
+            ) {
+              try {
+                const summary = `${name}(${JSON.stringify(args).slice(0, 200)})`;
+                const answer = await ctx.askUser(
+                  `Approve this step?\n\n${summary}`,
+                  "yesno"
+                );
+                if (answer !== "yes") {
+                  approvalDenied = true;
+                  error = "Step denied by user.";
+                  result = { error };
+                  consecutiveErrors++;
+                }
+              } catch (err) {
+                approvalDenied = true;
+                error = `Approval prompt failed: ${err instanceof Error ? err.message : err}`;
+                result = { error };
+                consecutiveErrors++;
+              }
+            }
+
+            if (!approvalDenied) {
+              try {
+                result = await tool.invoke(args, ctx);
+                consecutiveErrors = 0;
+              } catch (err) {
+                error = err instanceof Error ? err.message : String(err);
+                result = { error };
+                consecutiveErrors++;
+              }
+            } else {
+              // result already set above to the error stub.
+              result = result!;
             }
           }
 
@@ -279,6 +352,9 @@ export class AgentExecutor extends EventEmitter {
       // Always close the browser — it's a heavyweight resource and leaking
       // between runs causes mysterious second-run failures.
       await closeBrowserSession();
+      // Same for the Python desktop helper. Kills the subprocess if one
+      // was spawned; no-op if the run never reached Level 2.
+      closeDesktopSession();
     }
   }
 

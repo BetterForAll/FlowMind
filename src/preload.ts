@@ -61,14 +61,22 @@ const api = {
     ipcRenderer.invoke("automations:disableAutoFix", runId),
   promotePatch: (patchPath: string) =>
     ipcRenderer.invoke("automations:promotePatch", patchPath),
-  // Stage 2 — agent-first execution
+  // Stage 2 + 3 — agent-first execution
   runAsAgent: (
     flowId: string,
     params: Record<string, string>,
-    opts?: { synthesize?: boolean; format?: "python" | "nodejs" }
+    opts?: {
+      synthesize?: boolean;
+      format?: "python" | "nodejs";
+      level?: 1 | 2;
+      approveEachStep?: boolean;
+    }
   ) => ipcRenderer.invoke("automations:runAsAgent", flowId, params, opts ?? {}),
   answerAgentPrompt: (promptId: string, answer: string) =>
     ipcRenderer.invoke("automations:answerAgentPrompt", promptId, answer),
+  // Stage 3 — desktop helper readiness + install
+  checkDesktopReady: () => ipcRenderer.invoke("automations:checkDesktopReady"),
+  installDesktopDeps: () => ipcRenderer.invoke("automations:installDesktopDeps"),
   killAutomation: (runId: string) =>
     ipcRenderer.invoke("automations:kill", runId),
   sendInputToAutomation: (runId: string, text: string) =>

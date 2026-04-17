@@ -499,7 +499,15 @@ function setupIPC(): void {
       _e,
       flowId: string,
       params: Record<string, string>,
-      opts: { synthesize?: boolean; format?: "python" | "nodejs" } = {}
+      opts: {
+        synthesize?: boolean;
+        format?: "python" | "nodejs";
+        /** Tool tier — 1 (default) is Node-only, 2 enables desktop + vision. */
+        level?: 1 | 2;
+        /** When true, every destructive Level 2 tool call pauses for
+         *  user approval via the existing ask_user panel. */
+        approveEachStep?: boolean;
+      } = {}
     ) => {
       if (!agentExecutor) {
         throw new Error("Agent mode is disabled — GEMINI_API_KEY is missing.");
@@ -526,6 +534,8 @@ function setupIPC(): void {
             params,
             model,
             askUser: bridgeAgentAskUser,
+            level: opts.level ?? 1,
+            approveEachStep: opts.approveEachStep,
           });
 
           // On success, optionally synthesize and save as a replay script.
@@ -580,6 +590,59 @@ function setupIPC(): void {
       resolve(answer);
     }
     return { ok: !!resolve };
+  });
+
+  // Probe whether the Stage 3 desktop helper is ready (Python present
+  // AND required pip packages importable). Used by the UI's "Run with
+  // All Tools" button to decide between launching directly and showing
+  // the install prompt. Returns { ready, pythonAvailable, missing }.
+  ipcMain.handle("automations:checkDesktopReady", async () => {
+    const { spawn } = await import("node:child_process");
+    const { REQUIRED_DESKTOP_PACKAGES } = await import("./engine/agent-desktop");
+    const bin = process.platform === "win32" ? "python" : "python3";
+    return new Promise<{ ready: boolean; pythonAvailable: boolean; missing: string[] }>(
+      (resolve) => {
+        const code = [
+          "import importlib.util, sys",
+          "for p in sys.argv[1:]:",
+          "    if importlib.util.find_spec(p) is None:",
+          "        print(p)",
+        ].join("\n");
+        const child = spawn(bin, ["-c", code, ...REQUIRED_DESKTOP_PACKAGES], {
+          shell: false,
+          windowsHide: true,
+        });
+        let stdout = "";
+        child.stdout?.on("data", (c) => { stdout += c.toString("utf-8"); });
+        child.on("error", () => resolve({ ready: false, pythonAvailable: false, missing: REQUIRED_DESKTOP_PACKAGES }));
+        child.on("exit", (code) => {
+          const pythonAvailable = code === 0 || stdout.length > 0;
+          const missing = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          resolve({
+            ready: pythonAvailable && missing.length === 0,
+            pythonAvailable,
+            missing: pythonAvailable ? missing : REQUIRED_DESKTOP_PACKAGES,
+          });
+        });
+      }
+    );
+  });
+
+  // Install the missing desktop pip packages via `python -m pip install`.
+  // Streams output through the existing automations runner so the UI
+  // shows live progress in the run panel — same UX as the script-runner's
+  // Install button, just for a fixed package list.
+  ipcMain.handle("automations:installDesktopDeps", async () => {
+    const { REQUIRED_DESKTOP_PACKAGES } = await import("./engine/agent-desktop");
+    const pathMod = await import("node:path");
+    // Reuse the AutomationRunner.installDeps path so output streams
+    // through the existing automation event channel. cwd doesn't matter
+    // for system pip — point it at the automations dir to satisfy the
+    // path-safety check inside installDeps.
+    const os = await import("node:os");
+    const cwd = pathMod.join(os.homedir(), "flowtracker", "automations");
+    await (await import("node:fs/promises")).mkdir(cwd, { recursive: true });
+    return { runId: automationRunner.installDeps("python", REQUIRED_DESKTOP_PACKAGES, cwd) };
   });
 
   ipcMain.handle("automations:kill", async (_e, runId: string) => {

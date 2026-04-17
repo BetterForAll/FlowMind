@@ -21,6 +21,19 @@ function copyNativeModules(buildPath: string) {
   }
 }
 
+/**
+ * Copy the `resources/` folder (Python helpers used by the Stage 3
+ * agent's desktop tools) next to the packaged app so the Node bridge
+ * can spawn them at runtime via process.resourcesPath.
+ */
+function copyResourcesFolder(buildPath: string) {
+  const src = path.resolve(__dirname, "resources");
+  const dest = path.join(buildPath, "resources");
+  if (fs.existsSync(src)) {
+    fs.cpSync(src, dest, { recursive: true });
+  }
+}
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: false,
@@ -39,6 +52,9 @@ const config: ForgeConfig = {
         // asar: false — files are directly in resources/app or the output root
         copyNativeModules(options.outputPaths[0]);
       }
+      // Stage 3 desktop helpers live alongside the binary so process.
+      // resourcesPath resolves them in both packaged and dev mode.
+      copyResourcesFolder(options.outputPaths[0]);
     },
   },
   makers: [

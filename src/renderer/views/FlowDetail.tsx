@@ -178,6 +178,26 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    *  the AGENT (not the script runner) for this format. Cleared when
    *  the agent kicks off or the form is dismissed. */
   const [pendingAgentFormat, setPendingAgentFormat] = useState<"python" | "nodejs" | null>(null);
+  /** Stage 3 — when set, the next agent kick-off uses Level 2 (desktop
+   *  + vision tools enabled). Cleared after launch or dismissal. */
+  const [pendingAgentLevel, setPendingAgentLevel] = useState<1 | 2>(1);
+  /** User toggle: pause and ask before every destructive Level 2 tool
+   *  call. Visible only when Level 2 is engaged. */
+  const [approveEachStep, setApproveEachStep] = useState(false);
+  /** Cached desktop-helper readiness probe. null = unknown until first
+   *  click; refreshed on demand. */
+  const [desktopReady, setDesktopReady] = useState<
+    | null
+    | {
+        ready: boolean;
+        pythonAvailable: boolean;
+        missing: string[];
+      }
+  >(null);
+  /** True while the install IPC is running so the install banner can
+   *  show a spinner. Cleared by the run-event subscription when the pip
+   *  install subprocess exits. */
+  const [installingDesktopDeps, setInstallingDesktopDeps] = useState(false);
   /** Smart Run mode — when true, the renderer auto-escalates: tries the
    *  script first (with Stage 1 auto-fix), and if all patches exhaust,
    *  falls through to an agent run automatically. The user just clicks
@@ -336,6 +356,17 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           if (current.kind === "install" && event.reason === "completed" && event.code === 0) {
             const a = automationsByFormat[current.format];
             if (a) reloadExternalDeps(a.filePath, current.format);
+            // If the desktop-deps install was the one in flight, re-probe
+            // readiness so the install banner clears and the user can
+            // re-click "Run with All Tools".
+            if (installingDesktopDeps) {
+              setInstallingDesktopDeps(false);
+              window.flowmind.checkDesktopReady().then((s) => setDesktopReady(s as { ready: boolean; pythonAvailable: boolean; missing: string[] }));
+            }
+          } else if (current.kind === "install" && installingDesktopDeps) {
+            // Install failed/timed-out — keep the banner up so the user
+            // sees what happened. Clear the in-flight flag.
+            setInstallingDesktopDeps(false);
           }
           return null; // run is done
         }
@@ -343,7 +374,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       });
     });
     return unsubscribe;
-  }, [flow, automationsByFormat, reloadLogsForFormat, reloadExternalDeps]);
+  }, [flow, automationsByFormat, reloadLogsForFormat, reloadExternalDeps, installingDesktopDeps]);
 
   // Subscribe to auto-fix events (main-side orchestration). These ride a
   // separate channel from the raw runner events so they're easy to filter.
@@ -789,7 +820,9 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
 
   const kickOffAgentRun = async (
     format: "python" | "nodejs",
-    params: Record<string, string>
+    params: Record<string, string>,
+    level: 1 | 2 = 1,
+    approve = false
   ) => {
     setAgentSteps([]);
     setAgentPrompt(null);
@@ -798,10 +831,11 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       const result = (await window.flowmind.runAsAgent(
         flowId,
         params,
-        { synthesize: true, format }
+        { synthesize: true, format, level, approveEachStep: approve }
       )) as { runId: string };
       setAgentRun({ runId: result.runId, format, status: "running" });
       setPendingAgentFormat(null);
+      setPendingAgentLevel(1);
       setParamFormOpen(false);
     } catch (err) {
       setAgentRun({
@@ -810,6 +844,84 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         status: "failed",
         reason: err instanceof Error ? err.message : String(err),
       });
+    }
+  };
+
+  /**
+   * Stage 3 entry point — "Run with All Tools". Probes the Python
+   * desktop helper first; if any pieces are missing, surfaces an
+   * install banner and bails. Otherwise routes through the same
+   * agent path with level=2 enabled.
+   */
+  const startAgentRunWithAllTools = async (a: AutomationFile) => {
+    if (a.format !== "python" && a.format !== "nodejs") return;
+    const ok = confirm(
+      `Run with ALL tools (Stage 3)?\n\n` +
+        `Adds desktop UI Automation (window focus, keyboard, mouse, ` +
+        `vision-based clicks) on top of the Stage 2 agent. The agent ` +
+        `can drive native Windows apps directly — make sure you trust ` +
+        `the flow before proceeding.\n\n` +
+        `Tip: turn on "Approve each step" if this is your first try ` +
+        `with this flow.`
+    );
+    if (!ok) return;
+
+    // Readiness check — Python + pywinauto + uiautomation + pyautogui +
+    // pillow all need to be importable. If anything's missing, surface
+    // the install banner and abort the launch.
+    try {
+      const status = (await window.flowmind.checkDesktopReady()) as {
+        ready: boolean;
+        pythonAvailable: boolean;
+        missing: string[];
+      };
+      setDesktopReady(status);
+      if (!status.ready) {
+        // Don't kick off the agent — the user needs to install first.
+        return;
+      }
+    } catch (err) {
+      setAgentRun({
+        runId: "",
+        format: a.format as AutomationFormat,
+        status: "failed",
+        reason: `Desktop readiness probe failed: ${err instanceof Error ? err.message : err}`,
+      });
+      return;
+    }
+
+    const params = formParameters();
+    if (params.length > 0) {
+      setParamDraft((prev) => {
+        const next = { ...prev };
+        for (const p of params) {
+          if (!(p.name in next)) next[p.name] = p.observed_values?.[0] ?? "";
+        }
+        return next;
+      });
+      setParamFormOpen(true);
+      setPendingAgentFormat(a.format as "python" | "nodejs");
+      setPendingAgentLevel(2);
+      return;
+    }
+    kickOffAgentRun(a.format as "python" | "nodejs", {}, 2, approveEachStep);
+  };
+
+  /** Trigger a fresh install of the desktop pip packages. The install
+   *  streams output through the existing automation event channel — we
+   *  hook activeRun so the user sees the pip output in the run panel,
+   *  and the exit handler below re-probes readiness. */
+  const installDesktopDeps = async () => {
+    setInstallingDesktopDeps(true);
+    setRunOutput([]);
+    setRunStatus("installing");
+    try {
+      const result = (await window.flowmind.installDesktopDeps()) as { runId: string };
+      setActiveRun({ runId: result.runId, format: "python", kind: "install" });
+    } catch (err) {
+      setInstallingDesktopDeps(false);
+      setRunStatus("error");
+      setRunError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -1382,6 +1494,14 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         >
                           Run as Agent
                         </button>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={() => startAgentRunWithAllTools(a)}
+                          disabled={!!activeRun || agentRun !== null}
+                          title="Stage 3: agent + desktop UI Automation + vision. Can drive native Windows apps. Requires Python with pywinauto/uiautomation/pyautogui/pillow."
+                        >
+                          Run with All Tools
+                        </button>
                       </>
                     )
                   )}
@@ -1479,7 +1599,12 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                           if (pendingSmartRunFormat) {
                             kickOffSmartRun(a, paramDraft);
                           } else if (pendingAgentFormat) {
-                            kickOffAgentRun(pendingAgentFormat, paramDraft);
+                            kickOffAgentRun(
+                              pendingAgentFormat,
+                              paramDraft,
+                              pendingAgentLevel,
+                              pendingAgentLevel === 2 ? approveEachStep : false
+                            );
                           } else {
                             runAutomation(a, paramDraft);
                           }
@@ -1493,6 +1618,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       >
                         {pendingSmartRunFormat
                           ? "Smart Run with these values"
+                          : pendingAgentFormat && pendingAgentLevel === 2
+                          ? "Run with All Tools, these values"
                           : pendingAgentFormat
                           ? "Run as Agent with these values"
                           : "Run with these values"}
@@ -1502,12 +1629,122 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         onClick={() => {
                           setParamFormOpen(false);
                           setPendingAgentFormat(null);
+                          setPendingAgentLevel(1);
                           setPendingSmartRunFormat(null);
                         }}
                       >
                         Cancel
                       </button>
                     </div>
+                  </div>
+                )}
+
+                {/* Stage 3 readiness banner — surfaced after the user
+                    clicks "Run with All Tools" if Python or any of the
+                    pip packages aren't ready. Stays visible until the
+                    user clicks Install (which streams pip output into
+                    the run panel) and the post-install probe clears it. */}
+                {desktopReady && !desktopReady.ready && (activeTab === "python" || activeTab === "nodejs") && (
+                  <div
+                    style={{
+                      marginBottom: 8,
+                      padding: "10px 12px",
+                      border: "1px solid var(--border)",
+                      borderLeft: "3px solid var(--yellow, #fbbf24)",
+                      borderRadius: 4,
+                      background: "rgba(251, 191, 36, 0.06)",
+                      fontSize: 13,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    <div>
+                      <strong>Desktop tools not ready.</strong>{" "}
+                      {!desktopReady.pythonAvailable ? (
+                        <>
+                          Python isn't installed or not on PATH. Install it from{" "}
+                          <a
+                            href="https://www.python.org/downloads/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: "var(--accent)" }}
+                          >
+                            python.org/downloads
+                          </a>
+                          , then click Re-check.
+                        </>
+                      ) : (
+                        <>
+                          Missing pip packages: <code>{desktopReady.missing.join(" ")}</code>
+                        </>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {desktopReady.pythonAvailable && desktopReady.missing.length > 0 && (
+                        <button
+                          className="btn btn-primary"
+                          style={{ padding: "4px 12px", fontSize: 12 }}
+                          onClick={installDesktopDeps}
+                          disabled={installingDesktopDeps || !!activeRun}
+                        >
+                          {installingDesktopDeps ? "Installing…" : `Install via pip`}
+                        </button>
+                      )}
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: "4px 12px", fontSize: 12 }}
+                        onClick={async () => {
+                          const s = (await window.flowmind.checkDesktopReady()) as {
+                            ready: boolean;
+                            pythonAvailable: boolean;
+                            missing: string[];
+                          };
+                          setDesktopReady(s);
+                        }}
+                      >
+                        Re-check
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: "4px 12px", fontSize: 12 }}
+                        onClick={() => setDesktopReady(null)}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Approve-each-step toggle — visible when the param
+                    form is open AND the user is about to start a Level 2
+                    run. Lets them gate every destructive desktop call
+                    behind a yes/no prompt for first-time runs. */}
+                {paramFormOpen && pendingAgentLevel === 2 && (
+                  <div
+                    style={{
+                      marginBottom: 8,
+                      padding: "8px 12px",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      fontSize: 13,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      id="approve-each-step"
+                      checked={approveEachStep}
+                      onChange={(e) => setApproveEachStep(e.target.checked)}
+                    />
+                    <label htmlFor="approve-each-step" style={{ cursor: "pointer" }}>
+                      Approve every destructive step before it executes
+                      <span style={{ color: "var(--text-muted)", marginLeft: 6 }}>
+                        (clicks, types, key sends, app launches, focus changes)
+                      </span>
+                    </label>
                   </div>
                 )}
 
