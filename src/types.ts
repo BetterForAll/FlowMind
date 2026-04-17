@@ -1,5 +1,16 @@
 // Flow document types matching the spec's output formats
 
+/**
+ * Worthiness tier assigned by the classifier. Guides UI surface (sort/filter,
+ * hide noise) and the interview/automation priority.
+ * - "noise": not a repeatable workflow. Should not be saved as a flow.
+ * - "partial-with-gaps": pattern exists but steps/decisions are unclear.
+ * - "repeatable-uncertain": reproducible but uncertain automation payoff.
+ * - "meaningful": clear trigger, reproducible steps, real outcome — prime
+ *   automation candidate.
+ */
+export type FlowWorth = "noise" | "partial-with-gaps" | "repeatable-uncertain" | "meaningful";
+
 export interface FlowFrontmatter {
   type: "complete-flow" | "partial-flow";
   id: string;
@@ -14,6 +25,16 @@ export interface FlowFrontmatter {
   apps: string[];
   /** ISO windowStart timestamps of descriptions that contributed to this flow. */
   source_windows?: string[];
+  /** Worthiness tier set by WorthJudge. Optional — older flows predate classification. */
+  worth?: FlowWorth;
+  /** One-sentence rationale for the worth tier, useful in the UI and for debugging prompts. */
+  worth_reason?: string;
+  /**
+   * Rough estimate of minutes saved per future occurrence IF automated.
+   * Derived from `avg_duration` and `occurrences` — see WorthJudge for formula.
+   * Intended as a relative ranking signal, not an absolute promise.
+   */
+  time_saved_estimate_minutes?: number;
 }
 
 export interface KnowledgeFrontmatter {
