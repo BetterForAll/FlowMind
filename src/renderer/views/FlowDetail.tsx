@@ -562,29 +562,6 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         </div>
       )}
 
-      {/* Primary automation shortcuts for complete flows — jump straight to the
-          generated output for the chosen format. The tabbed UI below still
-          provides the full matrix. */}
-      {isComplete && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-          <button
-            className="btn btn-primary"
-            onClick={() => generateAutomation("claude-skill", !!automationsByFormat["claude-skill"])}
-            disabled={generating}
-            title="Generate a Claude Code skill you can invoke as a slash command"
-          >
-            {generating ? "Working..." : (automationsByFormat["claude-skill"] ? "Re-Automate (Claude Skill)" : "Automate")}
-          </button>
-          <button
-            className="btn btn-secondary"
-            onClick={() => generateAutomation("python", !!automationsByFormat["python"])}
-            disabled={generating}
-            title="Generate a runnable Python script for this workflow"
-          >
-            {generating ? "Working..." : (automationsByFormat["python"] ? "Re-Create script (Python)" : "Create script")}
-          </button>
-        </div>
-      )}
 
       <div className="detail-body">{flow.body}</div>
 
