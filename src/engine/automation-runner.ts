@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 
 const AUTOMATIONS_DIR = path.join(os.homedir(), "flowtracker", "automations");
+const LOGS_DIR = path.join(AUTOMATIONS_DIR, "logs");
 const MAX_OUTPUT_BYTES = 256 * 1024; // 256 KB — guards against runaway loops
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -23,6 +25,10 @@ export interface RunEvent {
   reason?: "completed" | "killed" | "timeout" | "error";
   /** Present for "exit" events with reason "error". */
   error?: string;
+  /** Present for "exit" events when spawn failed because the interpreter binary was not found. The UI uses this to offer a download link. */
+  missingInterpreter?: "python" | "nodejs";
+  /** Present for "exit" events — absolute path of the log file written to disk. */
+  logFilePath?: string;
 }
 
 interface ActiveRun {
@@ -31,6 +37,13 @@ interface ActiveRun {
   outputBytes: number;
   timeoutHandle: NodeJS.Timeout;
   killed: boolean;
+  /** Absolute path of the log file for this run. */
+  logFilePath: string;
+  /** Open write stream used to append output + the footer on exit. */
+  logStream: fs.WriteStream;
+  /** Walltime start, used to compute duration in the log footer. */
+  startedAt: number;
+  format: "python" | "nodejs";
 }
 
 /**
@@ -78,6 +91,33 @@ export class AutomationRunner extends EventEmitter {
     const command = pickCommand(format);
     const cwd = path.dirname(resolved);
     const runId = randomUUID();
+    const startedAt = Date.now();
+    const startedAtIso = new Date(startedAt).toISOString();
+
+    // Log file location: <automations>/logs/<script-slug>/<format>-<timestamp>.log.
+    // We extract the flow-slug from the script filename, which follows
+    // FlowStore.saveAutomation's "<slug>-<format>.<ext>" convention.
+    const scriptBase = path.basename(resolved).replace(/\.[a-z0-9]+$/i, "");
+    const logSubdir = path.join(LOGS_DIR, scriptBase);
+    fs.mkdirSync(logSubdir, { recursive: true });
+    const logFilePath = path.join(
+      logSubdir,
+      `${format}-${startedAtIso.replace(/[:.]/g, "-")}.log`
+    );
+    const logStream = fs.createWriteStream(logFilePath, { encoding: "utf-8" });
+    logStream.write(
+      [
+        `# FlowMind automation run log`,
+        `# script: ${resolved}`,
+        `# format: ${format}`,
+        `# command: ${command.bin} ${command.args.join(" ")} ${resolved}`.trim(),
+        `# cwd: ${cwd}`,
+        `# started: ${startedAtIso}`,
+        `# run_id: ${runId}`,
+        ``,
+        ``,
+      ].join("\n")
+    );
 
     const child = spawn(command.bin, [...command.args, resolved], {
       cwd,
@@ -96,14 +136,15 @@ export class AutomationRunner extends EventEmitter {
       timeoutHandle: setTimeout(() => {
         active.killed = true;
         try { child.kill("SIGKILL"); } catch { /* already gone */ }
-        this.emitEvent({
-          runId,
-          type: "output",
-          stream: "stderr",
-          data: `\n[AutomationRunner] Timeout after ${Math.round(timeoutMs / 1000)}s — process killed.\n`,
-        });
+        const timeoutMsg = `\n[AutomationRunner] Timeout after ${Math.round(timeoutMs / 1000)}s — process killed.\n`;
+        active.logStream.write(`[stderr] ${timeoutMsg}`);
+        this.emitEvent({ runId, type: "output", stream: "stderr", data: timeoutMsg });
       }, timeoutMs),
       killed: false,
+      logFilePath,
+      logStream,
+      startedAt,
+      format,
     };
     this.runs.set(runId, active);
 
@@ -113,30 +154,56 @@ export class AutomationRunner extends EventEmitter {
       const remaining = MAX_OUTPUT_BYTES - active.outputBytes;
       const truncated = text.length > remaining ? text.slice(0, remaining) + "\n[... output truncated — cap reached ...]\n" : text;
       active.outputBytes += truncated.length;
+      // Prefix every line in the log so it's greppable outside the app.
+      active.logStream.write(truncated.split("\n").map((l, i, arr) => (i < arr.length - 1 || l !== "") ? `[${stream}] ${l}` : l).join("\n"));
       this.emitEvent({ runId, type: "output", stream, data: truncated });
     };
     child.stdout?.on("data", captureChunk("stdout"));
     child.stderr?.on("data", captureChunk("stderr"));
 
-    child.on("error", (err) => {
+    const finalize = (reason: RunEvent["reason"], code: number | null, error?: string) => {
       clearTimeout(active.timeoutHandle);
       this.runs.delete(runId);
-      this.emitEvent({
+      const endedAt = Date.now();
+      const durationMs = endedAt - active.startedAt;
+      active.logStream.write(
+        [
+          ``,
+          `# ended: ${new Date(endedAt).toISOString()}`,
+          `# duration_ms: ${durationMs}`,
+          `# exit_code: ${code ?? "null"}`,
+          `# reason: ${reason ?? "unknown"}`,
+          ...(error ? [`# error: ${error.replace(/\n/g, " ")}`] : []),
+          ``,
+        ].join("\n")
+      );
+      active.logStream.end();
+
+      const event: RunEvent = {
         runId,
         type: "exit",
-        reason: "error",
-        error: err instanceof Error ? err.message : String(err),
-        code: null,
-      });
+        reason,
+        code,
+        logFilePath: active.logFilePath,
+      };
+      if (error) event.error = error;
+      // Detect missing-interpreter (ENOENT on spawn) so the renderer can show
+      // a download link for the right runtime.
+      if (reason === "error" && error && /ENOENT/i.test(error)) {
+        event.missingInterpreter = active.format;
+      }
+      this.emitEvent(event);
+    };
+
+    child.on("error", (err) => {
+      finalize("error", null, err instanceof Error ? err.message : String(err));
     });
 
     child.on("exit", (code, signal) => {
-      clearTimeout(active.timeoutHandle);
-      this.runs.delete(runId);
       const reason: RunEvent["reason"] = active.killed
         ? (signal === "SIGKILL" ? "timeout" : "killed")
         : "completed";
-      this.emitEvent({ runId, type: "exit", reason, code: code ?? null });
+      finalize(reason, code ?? null);
     });
 
     return runId;

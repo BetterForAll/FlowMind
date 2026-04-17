@@ -10,10 +10,56 @@ import type {
   KnowledgeFrontmatter,
 } from "../types";
 
+export interface RunLogEntry {
+  filePath: string;
+  filename: string;
+  /** ISO timestamp parsed from the log header. */
+  startedAt: string;
+  /** ISO timestamp parsed from the log footer. Null if the log never closed (crash). */
+  endedAt: string | null;
+  /** Milliseconds between start and end, or null if the log has no footer. */
+  durationMs: number | null;
+  /** Process exit code, null when killed/timed-out/errored. */
+  exitCode: number | null;
+  /** Terminal state: completed | killed | timeout | error. Null for unclosed logs. */
+  reason: string | null;
+  sizeBytes: number;
+}
+
 const BASE_DIR = path.join(os.homedir(), "flowtracker");
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Parse the `# key: value` header/footer lines AutomationRunner writes around
+ * each log's body. Only reads the top 30 and bottom 30 lines to stay fast on
+ * large logs.
+ */
+async function parseLogMetadata(filePath: string): Promise<Omit<RunLogEntry, "filePath" | "filename">> {
+  const raw = await fsp.readFile(filePath, "utf-8");
+  const stat = await fsp.stat(filePath);
+  const lines = raw.split("\n");
+  const firstBlock = lines.slice(0, 30).join("\n");
+  const lastBlock = lines.slice(-30).join("\n");
+  const grab = (blob: string, key: string): string | null => {
+    const m = blob.match(new RegExp(`^# ${key}:\\s*(.*)$`, "m"));
+    return m ? m[1].trim() : null;
+  };
+  const startedAt = grab(firstBlock, "started") ?? stat.mtime.toISOString();
+  const endedAt = grab(lastBlock, "ended");
+  const exitCodeRaw = grab(lastBlock, "exit_code");
+  const durationRaw = grab(lastBlock, "duration_ms");
+  const reason = grab(lastBlock, "reason");
+  return {
+    startedAt,
+    endedAt,
+    durationMs: durationRaw != null && /^\d+$/.test(durationRaw) ? parseInt(durationRaw, 10) : null,
+    exitCode: exitCodeRaw != null && /^-?\d+$/.test(exitCodeRaw) ? parseInt(exitCodeRaw, 10) : null,
+    reason,
+    sizeBytes: stat.size,
+  };
 }
 
 export class FlowStore {
@@ -286,6 +332,62 @@ export class FlowStore {
       throw new Error("Refusing to read file outside automations directory");
     }
     return fsp.readFile(resolved, "utf-8");
+  }
+
+  /**
+   * List run-log files for a given flow + automation format, newest first.
+   * Log layout: <automations>/logs/<flow-slug>-<format>/<format>-<timestamp>.log
+   * Each entry includes parsed metadata (start/end/exit/duration) read from
+   * the log's header and footer comment lines.
+   */
+  async listRunLogs(flowName: string, format: string): Promise<RunLogEntry[]> {
+    const slug = this.slugify(flowName);
+    const logsRoot = path.join(this.baseDir, "automations", "logs", `${slug}-${format}`);
+    if (!fs.existsSync(logsRoot)) return [];
+
+    const files = await fsp.readdir(logsRoot);
+    const entries: RunLogEntry[] = [];
+    for (const f of files) {
+      if (!f.endsWith(".log")) continue;
+      const filePath = path.join(logsRoot, f);
+      try {
+        const meta = await parseLogMetadata(filePath);
+        entries.push({ filePath, filename: f, ...meta });
+      } catch {
+        // Malformed log: still include it so the user can see + delete it.
+        const stat = await fsp.stat(filePath).catch(() => null);
+        entries.push({
+          filePath,
+          filename: f,
+          startedAt: stat?.mtime.toISOString() ?? new Date(0).toISOString(),
+          endedAt: null,
+          durationMs: null,
+          exitCode: null,
+          reason: null,
+          sizeBytes: stat?.size ?? 0,
+        });
+      }
+    }
+    entries.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+    return entries;
+  }
+
+  async readRunLog(filePath: string): Promise<string> {
+    const logsRoot = path.join(this.baseDir, "automations", "logs");
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(logsRoot))) {
+      throw new Error("Refusing to read file outside logs directory");
+    }
+    return fsp.readFile(resolved, "utf-8");
+  }
+
+  async deleteRunLog(filePath: string): Promise<void> {
+    const logsRoot = path.join(this.baseDir, "automations", "logs");
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(logsRoot))) {
+      throw new Error("Refusing to delete file outside logs directory");
+    }
+    await fsp.unlink(resolved);
   }
 
   private slugify(name: string): string {
