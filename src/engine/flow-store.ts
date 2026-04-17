@@ -104,14 +104,26 @@ export class FlowStore {
 
   /**
    * Merge evidence from a newly-detected flow into an existing flow file.
-   * Only frontmatter metadata is updated (occurrences, last_seen, source_windows, apps).
-   * The body is preserved as-is — body refinement is a separate, opt-in step.
+   * Only frontmatter metadata is updated (occurrences, last_seen,
+   * source_windows, apps, and optionally the worth fields). The body is
+   * preserved as-is — body refinement is a separate, opt-in step.
+   *
+   * If `worth` is supplied, it overwrites any existing worth fields so the
+   * classification reflects the freshly-merged state (new occurrence count,
+   * new time-saved estimate).
    *
    * Throws if the target file doesn't exist or can't be parsed.
    */
   async mergeFlow(
     filePath: string,
-    merge: { newSourceWindows?: string[]; newApps?: string[]; now?: string }
+    merge: {
+      newSourceWindows?: string[];
+      newApps?: string[];
+      now?: string;
+      worth?: FlowFrontmatter["worth"];
+      worth_reason?: string;
+      time_saved_estimate_minutes?: number;
+    }
   ): Promise<void> {
     const raw = await fsp.readFile(filePath, "utf-8");
     const parsed = this.parseDocument(raw);
@@ -133,6 +145,11 @@ export class FlowStore {
       last_seen: now,
       source_windows: mergedSourceWindows,
       apps: mergedApps,
+      ...(merge.worth !== undefined ? { worth: merge.worth } : {}),
+      ...(merge.worth_reason !== undefined ? { worth_reason: merge.worth_reason } : {}),
+      ...(merge.time_saved_estimate_minutes !== undefined
+        ? { time_saved_estimate_minutes: merge.time_saved_estimate_minutes }
+        : {}),
     };
 
     await fsp.writeFile(filePath, this.serializeDocument({ ...updated }, parsed.body), "utf-8");

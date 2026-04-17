@@ -5,6 +5,7 @@ import path from "node:path";
 import { FlowStore } from "./flow-store";
 import { DescriptionStore, type DescriptionDocument } from "./description-store";
 import { FlowEvaluator, type NewlyDetectedFlow } from "./evaluator";
+import { WorthJudge, type FlowForJudgment, type WorthVerdict } from "./worth-judge";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
@@ -100,6 +101,7 @@ export class FlowDetectionEngine {
   private descriptionStore: DescriptionStore;
   private genai: GoogleGenAI;
   private evaluator: FlowEvaluator;
+  private worthJudge: WorthJudge;
   private running = false;
 
   constructor(store: FlowStore, descriptionStore: DescriptionStore) {
@@ -112,6 +114,7 @@ export class FlowDetectionEngine {
     }
     this.genai = new GoogleGenAI({ apiKey });
     this.evaluator = new FlowEvaluator();
+    this.worthJudge = new WorthJudge();
   }
 
   isRunning(): boolean {
@@ -174,7 +177,8 @@ export class FlowDetectionEngine {
         analysis,
         validWindowStarts,
         decisions,
-        existingCompleteFlows
+        existingCompleteFlows,
+        settings.detectionModel
       );
 
       // 6. Mark descriptions as analyzed
@@ -292,7 +296,8 @@ export class FlowDetectionEngine {
     analysis: GeminiAnalysis,
     validWindowStarts: Set<string>,
     decisions: EvaluatorResult,
-    existingCompleteFlows: FlowDocument[]
+    existingCompleteFlows: FlowDocument[],
+    detectionModel: string
   ): Promise<DetectionResult> {
     const filterCitations = (ws?: string[]): string[] =>
       (ws ?? []).filter((w) => validWindowStarts.has(w));
@@ -339,18 +344,56 @@ export class FlowDetectionEngine {
       if (decision?.kind === "merge" && decision.matchedFlowId) {
         const target = existingById.get(decision.matchedFlowId);
         if (target) {
+          const postMergeOccurrences = (target.frontmatter.occurrences ?? 1) + 1;
+          const verdict = await this.worthJudge.classify(
+            {
+              type: "complete-flow",
+              name: flow.name,
+              trigger: flow.trigger,
+              steps: flow.steps,
+              apps: mergedApps,
+              occurrences: postMergeOccurrences,
+              avgDurationMinutes: flow.avg_duration_minutes,
+            },
+            detectionModel
+          );
+          if (verdict.worth === "noise") {
+            console.log(`[WorthJudge] Dropped merge into "${target.frontmatter.name}" — classified as noise: ${verdict.worth_reason}`);
+            continue;
+          }
           await this.store.mergeFlow(target.filePath, {
             newSourceWindows: mergedWindows,
             newApps: mergedApps,
             now,
+            worth: verdict.worth,
+            worth_reason: verdict.worth_reason,
+            time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
           });
           result.updatedComplete++;
           result.filesWritten.push(target.filePath);
-          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason})`);
+          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason}); worth=${verdict.worth}`);
           continue;
         }
         // Fallthrough: matchedFlowId didn't resolve — save as new (defensive; evaluator should have filtered this).
         console.warn(`[Detection] Evaluator returned merge with unresolved id ${decision.matchedFlowId}; saving as new`);
+      }
+
+      // Fresh flow — classify before saving so we can drop noise.
+      const verdict = await this.worthJudge.classify(
+        {
+          type: "complete-flow",
+          name: flow.name,
+          trigger: flow.trigger,
+          steps: flow.steps,
+          apps: mergedApps,
+          occurrences: 1,
+          avgDurationMinutes: flow.avg_duration_minutes,
+        },
+        detectionModel
+      );
+      if (verdict.worth === "noise") {
+        console.log(`[WorthJudge] Dropped new complete flow "${flow.name}" — classified as noise: ${verdict.worth_reason}`);
+        continue;
       }
 
       const frontmatter: FlowFrontmatter = {
@@ -365,6 +408,9 @@ export class FlowDetectionEngine {
         trigger: flow.trigger,
         apps: mergedApps,
         source_windows: mergedWindows,
+        worth: verdict.worth,
+        worth_reason: verdict.worth_reason,
+        time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
       };
 
       const body = `# ${flow.name}
@@ -390,9 +436,31 @@ ${flow.variations}`;
       const filePath = await this.store.saveFlow("complete", frontmatter, body);
       result.newComplete++;
       result.filesWritten.push(filePath);
+      console.log(`[Detection] Saved new complete flow "${flow.name}"; worth=${verdict.worth}, est. ${verdict.time_saved_estimate_minutes} min saved`);
     }
 
     for (const flow of analysis.partial_flows ?? []) {
+      const gapCount = (flow.observed_steps.match(/\[GAP\]/g) ?? []).length;
+      const verdict = await this.worthJudge.classify(
+        {
+          type: "partial-flow",
+          name: flow.name,
+          trigger: "", // partials may not have a crisp trigger yet
+          steps: flow.observed_steps,
+          apps: flow.apps,
+          occurrences: 1,
+          gaps: gapCount,
+        },
+        detectionModel
+      );
+      // A partial could hypothetically come back as noise if it has no gaps AND
+      // the judge considers it non-repeatable. Drop it rather than polluting
+      // the partial-flow folder.
+      if (verdict.worth === "noise") {
+        console.log(`[WorthJudge] Dropped new partial flow "${flow.name}" — classified as noise: ${verdict.worth_reason}`);
+        continue;
+      }
+
       const frontmatter: FlowFrontmatter = {
         type: "partial-flow",
         id: `flow-${uuid()}`,
@@ -401,9 +469,12 @@ ${flow.variations}`;
         last_seen: now,
         occurrences: 1,
         confidence: flow.confidence as "low" | "medium",
-        gaps: (flow.observed_steps.match(/\[GAP\]/g) ?? []).length,
+        gaps: gapCount,
         apps: flow.apps,
         source_windows: filterCitations(flow.source_windows),
+        worth: verdict.worth,
+        worth_reason: verdict.worth_reason,
+        time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
       };
 
       const body = `# ${flow.name} (Partial)
