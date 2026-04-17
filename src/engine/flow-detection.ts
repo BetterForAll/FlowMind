@@ -9,6 +9,7 @@ import { WorthJudge, type FlowForJudgment, type WorthVerdict } from "./worth-jud
 import { GapCloser, extractQuestions, insertAnswersAndRewriteQuestions } from "./gap-closer";
 import { PartialElevator } from "./partial-elevator";
 import { BodyRefiner } from "./body-refiner";
+import { ParamExtractor } from "./param-extractor";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
@@ -111,6 +112,7 @@ export class FlowDetectionEngine {
   private gapCloser: GapCloser;
   private partialElevator: PartialElevator;
   private bodyRefiner: BodyRefiner;
+  private paramExtractor: ParamExtractor;
   private running = false;
 
   constructor(store: FlowStore, descriptionStore: DescriptionStore) {
@@ -127,6 +129,7 @@ export class FlowDetectionEngine {
     this.gapCloser = new GapCloser();
     this.partialElevator = new PartialElevator();
     this.bodyRefiner = new BodyRefiner();
+    this.paramExtractor = new ParamExtractor();
   }
 
   isRunning(): boolean {
@@ -533,6 +536,14 @@ export class FlowDetectionEngine {
             },
             detectionModel
           );
+          // Re-extract parameters only when the body actually changed —
+          // parameters depend on the body text, so a same-body merge would
+          // produce the same list.
+          let mergedParameters: FlowFrontmatter["parameters"] | undefined;
+          if (refinedBody !== target.body) {
+            const fresh = await this.paramExtractor.extract(flow.name, refinedBody, detectionModel);
+            mergedParameters = mergeParameterLists(target.frontmatter.parameters, fresh);
+          }
           await this.store.mergeFlow(target.filePath, {
             newSourceWindows: mergedWindows,
             newApps: mergedApps,
@@ -541,11 +552,13 @@ export class FlowDetectionEngine {
             worth_reason: verdict.worth_reason,
             time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
             newBody: refinedBody === target.body ? undefined : refinedBody,
+            parameters: mergedParameters,
           });
           result.updatedComplete++;
           result.filesWritten.push(target.filePath);
           const bodyNote = refinedBody === target.body ? "body unchanged" : "body refined";
-          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason}); worth=${verdict.worth}; ${bodyNote}`);
+          const paramsNote = mergedParameters ? `, parameters=${mergedParameters.length}` : "";
+          console.log(`[Detection] Merged "${flow.name}" into existing "${target.frontmatter.name}" (${decision.reason}); worth=${verdict.worth}; ${bodyNote}${paramsNote}`);
           continue;
         }
         // Fallthrough: matchedFlowId didn't resolve — save as new (defensive; evaluator should have filtered this).
@@ -574,23 +587,6 @@ export class FlowDetectionEngine {
         continue;
       }
 
-      const frontmatter: FlowFrontmatter = {
-        type: "complete-flow",
-        id: `flow-${uuid()}`,
-        name: flow.name,
-        detected: now,
-        last_seen: now,
-        occurrences: 1,
-        confidence: flow.confidence as "high" | "medium",
-        avg_duration: flow.avg_duration_minutes,
-        trigger: flow.trigger,
-        apps: mergedApps,
-        source_windows: mergedWindows,
-        worth: verdict.worth,
-        worth_reason: verdict.worth_reason,
-        time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
-      };
-
       const body = `# ${flow.name}
 
 ## Trigger
@@ -611,10 +607,30 @@ ${flow.automation_classification}
 ## Variations Observed
 ${flow.variations}`;
 
+      const params = await this.paramExtractor.extract(flow.name, body, detectionModel);
+
+      const frontmatter: FlowFrontmatter = {
+        type: "complete-flow",
+        id: `flow-${uuid()}`,
+        name: flow.name,
+        detected: now,
+        last_seen: now,
+        occurrences: 1,
+        confidence: flow.confidence as "high" | "medium",
+        avg_duration: flow.avg_duration_minutes,
+        trigger: flow.trigger,
+        apps: mergedApps,
+        source_windows: mergedWindows,
+        worth: verdict.worth,
+        worth_reason: verdict.worth_reason,
+        time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
+        ...(params.length > 0 ? { parameters: params } : {}),
+      };
+
       const filePath = await this.store.saveFlow("complete", frontmatter, body);
       result.newComplete++;
       result.filesWritten.push(filePath);
-      console.log(`[Detection] Saved new complete flow "${flow.name}"; worth=${verdict.worth}, est. ${verdict.time_saved_estimate_minutes} min saved`);
+      console.log(`[Detection] Saved new complete flow "${flow.name}"; worth=${verdict.worth}, est. ${verdict.time_saved_estimate_minutes} min saved, parameters=${params.length}`);
     }
 
     for (const flow of analysis.partial_flows ?? []) {
@@ -757,6 +773,42 @@ function logEvaluatorSummary(decisions: EvaluatorResult): void {
   for (const d of decisions.withinRunDupes) {
     console.log(`[Evaluator]   within-run dupe #${d.indexA} & #${d.indexB} — ${d.reason}`);
   }
+}
+
+/**
+ * Merge a freshly-extracted parameter list with the existing one from disk.
+ * Key on `name`. For matching parameters, union observed_values (de-duped,
+ * capped at 8) and prefer the existing `kind` / `fixed_value` / `rule` if the
+ * user has already classified them — don't clobber user classification on
+ * every merge.
+ */
+function mergeParameterLists(
+  existing: import("../types").FlowParameter[] | undefined,
+  fresh: import("../types").FlowParameter[]
+): import("../types").FlowParameter[] {
+  const byName = new Map<string, import("../types").FlowParameter>();
+  for (const p of existing ?? []) byName.set(p.name, p);
+  for (const p of fresh) {
+    const prior = byName.get(p.name);
+    if (!prior) {
+      byName.set(p.name, p);
+      continue;
+    }
+    const mergedValues = Array.from(
+      new Set([...(prior.observed_values ?? []), ...(p.observed_values ?? [])])
+    ).slice(0, 8);
+    byName.set(p.name, {
+      // Keep the most-specific description (prefer fresh if non-empty, else prior)
+      name: prior.name,
+      description: p.description || prior.description,
+      // Prefer the classified `kind` (user wouldn't want it reset to null).
+      kind: prior.kind ?? p.kind,
+      observed_values: mergedValues.length > 0 ? mergedValues : undefined,
+      fixed_value: prior.fixed_value,
+      rule: prior.rule,
+    });
+  }
+  return Array.from(byName.values());
 }
 
 /** Compact the model's `steps` markdown into a short line for the evaluator prompt. */

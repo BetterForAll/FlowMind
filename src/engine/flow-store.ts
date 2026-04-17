@@ -192,6 +192,7 @@ export class FlowStore {
       worth_reason?: string;
       time_saved_estimate_minutes?: number;
       newBody?: string;
+      parameters?: FlowFrontmatter["parameters"];
     }
   ): Promise<void> {
     const raw = await fsp.readFile(filePath, "utf-8");
@@ -219,6 +220,7 @@ export class FlowStore {
       ...(merge.time_saved_estimate_minutes !== undefined
         ? { time_saved_estimate_minutes: merge.time_saved_estimate_minutes }
         : {}),
+      ...(merge.parameters !== undefined ? { parameters: merge.parameters } : {}),
     };
 
     const bodyToWrite = merge.newBody ?? parsed.body;
@@ -472,7 +474,16 @@ export class FlowStore {
       const key = line.slice(0, colonIdx).trim();
       let value: unknown = line.slice(colonIdx + 1).trim();
 
-      // Parse arrays like [app1, app2]
+      // Parse JSON arrays/objects — used for structured frontmatter like
+      // `parameters: [{...}, {...}]`. We try JSON first because it preserves
+      // nested structure; if JSON.parse fails we fall back to the simple
+      // comma-split used for string arrays.
+      if (typeof value === "string" && (value.startsWith("[{") || (value.startsWith("{") && value.endsWith("}")))) {
+        try {
+          value = JSON.parse(value);
+        } catch { /* fall through to comma-split */ }
+      }
+      // Parse simple string arrays like [app1, app2]
       if (typeof value === "string" && value.startsWith("[") && value.endsWith("]")) {
         value = value
           .slice(1, -1)
@@ -496,8 +507,14 @@ export class FlowStore {
   ): string {
     const lines: string[] = ["---"];
     for (const [key, value] of Object.entries(frontmatter)) {
-      if (Array.isArray(value)) {
+      if (Array.isArray(value) && value.length > 0 && typeof value[0] === "object" && value[0] !== null) {
+        // Array of objects — serialize as JSON on one line so parse can
+        // round-trip the structure. Used for `parameters`.
+        lines.push(`${key}: ${JSON.stringify(value)}`);
+      } else if (Array.isArray(value)) {
         lines.push(`${key}: [${value.join(", ")}]`);
+      } else if (value && typeof value === "object") {
+        lines.push(`${key}: ${JSON.stringify(value)}`);
       } else {
         lines.push(`${key}: ${value}`);
       }

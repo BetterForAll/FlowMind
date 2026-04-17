@@ -11,6 +11,40 @@
  */
 export type FlowWorth = "noise" | "partial-with-gaps" | "repeatable-uncertain" | "meaningful";
 
+/**
+ * How a parameter's value is decided at automation time. The three kinds
+ * map to the three ways the target capability map distinguishes parameters:
+ *   - "fixed":   same value every run (baked into the automation).
+ *   - "rule":    derived from observable context (time-of-day, trigger
+ *                file name, current day-of-week, etc.). Needs a small
+ *                LLM-generated decision function.
+ *   - "runtime": the user provides it each run (the NL-to-params
+ *                extractor routes free-text input here).
+ */
+export type ParameterKind = "fixed" | "rule" | "runtime";
+
+/**
+ * One variable that a flow references abstractly (e.g. `[subject]`,
+ * `[folder]`). Populated by the parameters extractor and, over time,
+ * refined by interviews and by successive observations.
+ */
+export interface FlowParameter {
+  /** Canonical short name used inside the flow body (e.g. "subject"). */
+  name: string;
+  /** One-sentence description of what this parameter represents. */
+  description: string;
+  /** Current classification. `null` when not yet classified — the UI
+   *  surfaces these as "needs classification". */
+  kind: ParameterKind | null;
+  /** Concrete values observed across runs, newest-first. Used as examples
+   *  when asking the user to classify / supply a runtime value. */
+  observed_values?: string[];
+  /** If kind === "fixed", the value used every run. */
+  fixed_value?: string;
+  /** If kind === "rule", a one-sentence description of how to derive it. */
+  rule?: string;
+}
+
 export interface FlowFrontmatter {
   type: "complete-flow" | "partial-flow";
   id: string;
@@ -35,6 +69,12 @@ export interface FlowFrontmatter {
    * Intended as a relative ranking signal, not an absolute promise.
    */
   time_saved_estimate_minutes?: number;
+  /**
+   * Dynamic variables the flow depends on. Populated by the parameters
+   * extractor when a flow is first saved or merged with a materially
+   * different observation. Absent on older flows.
+   */
+  parameters?: FlowParameter[];
 }
 
 export interface KnowledgeFrontmatter {
