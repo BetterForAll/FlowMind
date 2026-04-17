@@ -6,6 +6,7 @@ import { FlowStore } from "./flow-store";
 import { DescriptionStore, type DescriptionDocument } from "./description-store";
 import { FlowEvaluator, type NewlyDetectedFlow } from "./evaluator";
 import { WorthJudge, type FlowForJudgment, type WorthVerdict } from "./worth-judge";
+import { GapCloser, extractQuestions, insertAnswersAndRewriteQuestions } from "./gap-closer";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
@@ -102,6 +103,7 @@ export class FlowDetectionEngine {
   private genai: GoogleGenAI;
   private evaluator: FlowEvaluator;
   private worthJudge: WorthJudge;
+  private gapCloser: GapCloser;
   private running = false;
 
   constructor(store: FlowStore, descriptionStore: DescriptionStore) {
@@ -115,6 +117,7 @@ export class FlowDetectionEngine {
     this.genai = new GoogleGenAI({ apiKey });
     this.evaluator = new FlowEvaluator();
     this.worthJudge = new WorthJudge();
+    this.gapCloser = new GapCloser();
   }
 
   isRunning(): boolean {
@@ -153,7 +156,15 @@ export class FlowDetectionEngine {
       // 3. Single Gemini call (text + key screenshots only)
       const analysis = await this.analyzeWithGemini(settings.detectionModel, windowParts, settings.thinking);
 
-      // 4. Evaluator pass — decide per newly-detected complete flow whether to
+      // 4. Autonomous gap-closure pass on existing partial flows. This runs
+      //    BEFORE the matcher so that partials promoted to complete this run
+      //    can participate in matching as existing completes.
+      const gapStats = await this.runGapClosure(descriptions, settings.detectionModel);
+      if (gapStats.promoted > 0 || gapStats.updated > 0) {
+        console.log(`[GapCloser] Autonomously promoted ${gapStats.promoted} partial(s), updated ${gapStats.updated} partial(s) with new answers`);
+      }
+
+      // 5. Evaluator pass — decide per newly-detected complete flow whether to
       //    save as new or merge into an existing flow. Also collapse any
       //    within-run duplicates. The evaluator has its own failure-isolation
       //    fallback (returns "all new" on error).
@@ -171,7 +182,7 @@ export class FlowDetectionEngine {
       );
       logEvaluatorSummary(decisions);
 
-      // 5. Save results (flows + knowledge), filtering source_windows to only real citations
+      // 6. Save results (flows + knowledge), filtering source_windows to only real citations
       const validWindowStarts = new Set(descriptions.map((d) => d.frontmatter.windowStart));
       const result = await this.saveResults(
         analysis,
@@ -180,11 +191,12 @@ export class FlowDetectionEngine {
         existingCompleteFlows,
         settings.detectionModel
       );
+      result.updatedComplete += gapStats.promoted;
 
-      // 6. Mark descriptions as analyzed
+      // 7. Mark descriptions as analyzed
       await this.descriptionStore.markAnalyzed(descriptions.map((d) => d.filePath));
 
-      // 7. Link contributing descriptions so they survive age-based cleanup
+      // 8. Link contributing descriptions so they survive age-based cleanup
       const cited = new Set<string>();
       for (const f of analysis.complete_flows ?? []) (f.source_windows ?? []).forEach((w) => cited.add(w));
       for (const f of analysis.partial_flows ?? []) (f.source_windows ?? []).forEach((w) => cited.add(w));
@@ -199,6 +211,106 @@ export class FlowDetectionEngine {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Autonomous gap-closure across runs. For every on-disk partial flow with
+   * open gap questions, ask the GapCloser whether the current run's new
+   * observation narratives provide evidence that answers any gap. If all
+   * gaps close, promote the partial to complete. If some close, update the
+   * partial with the autonomous answers and the remaining questions.
+   *
+   * Returns counts of promoted and updated partials.
+   */
+  private async runGapClosure(
+    descriptions: DescriptionDocument[],
+    model: string
+  ): Promise<{ promoted: number; updated: number }> {
+    const { partial } = await this.store.getAllFlows();
+    let promoted = 0;
+    let updated = 0;
+
+    for (const p of partial) {
+      const originalQuestions = extractQuestions(p.body);
+      if (originalQuestions.length === 0) continue;
+
+      const result = await this.gapCloser.closeGaps(p, descriptions, model);
+      if (result.answered.length === 0) continue;
+
+      const newBody = insertAnswersAndRewriteQuestions(
+        p.body,
+        originalQuestions,
+        result.answered,
+        result.unanswered
+      );
+
+      if (result.unanswered.length === 0) {
+        // All gaps closed — synthesize a clean complete body and promote.
+        let completeBody: string;
+        try {
+          completeBody = await this.gapCloser.synthesizeCompleteBody(newBody, model);
+        } catch (err) {
+          // Synthesis failure: keep the partial updated with its inline answers
+          // rather than losing the autonomous work. Skip promotion.
+          console.warn(`[GapCloser] Synthesis failed for "${p.frontmatter.name}" — leaving as updated partial:`, err);
+          const updatedFrontmatter: FlowFrontmatter = {
+            ...p.frontmatter,
+            gaps: 0,
+            last_seen: new Date().toISOString(),
+          };
+          await this.store.updateFlow(p.filePath, updatedFrontmatter, newBody);
+          updated++;
+          continue;
+        }
+
+        // Re-classify the newly-promoted flow: it's no longer structurally
+        // partial, so WorthJudge will evaluate it like any complete flow.
+        const verdict = await this.worthJudge.classify(
+          {
+            type: "complete-flow",
+            name: p.frontmatter.name,
+            trigger: p.frontmatter.trigger ?? "",
+            steps: completeBody,
+            apps: p.frontmatter.apps,
+            occurrences: p.frontmatter.occurrences,
+            avgDurationMinutes: p.frontmatter.avg_duration,
+          },
+          model
+        );
+
+        const completeFrontmatter: FlowFrontmatter = {
+          ...p.frontmatter,
+          type: "complete-flow",
+          confidence: "medium",
+          last_seen: new Date().toISOString(),
+          worth: verdict.worth === "noise" ? "repeatable-uncertain" : verdict.worth,
+          worth_reason:
+            verdict.worth === "noise"
+              ? "Auto-promoted from partial; judge returned noise but promotion already done so tier coerced to repeatable-uncertain."
+              : verdict.worth_reason,
+          time_saved_estimate_minutes: verdict.time_saved_estimate_minutes,
+        };
+        // `gaps` is no longer meaningful on a complete flow — drop it.
+        delete (completeFrontmatter as unknown as Record<string, unknown>).gaps;
+
+        await this.store.promotePartialToComplete(p.filePath, completeFrontmatter, completeBody);
+        promoted++;
+        console.log(`[GapCloser] Promoted "${p.frontmatter.name}" to complete — ${result.answered.length} gap(s) closed autonomously`);
+      } else {
+        // Some gaps remain — rewrite the partial in place with the answered
+        // gaps preserved and the surviving questions renumbered.
+        const updatedFrontmatter: FlowFrontmatter = {
+          ...p.frontmatter,
+          gaps: result.unanswered.length,
+          last_seen: new Date().toISOString(),
+        };
+        await this.store.updateFlow(p.filePath, updatedFrontmatter, newBody);
+        updated++;
+        console.log(`[GapCloser] Closed ${result.answered.length} of ${originalQuestions.length} gap(s) on "${p.frontmatter.name}"; ${result.unanswered.length} still open`);
+      }
+    }
+
+    return { promoted, updated };
   }
 
   /**
