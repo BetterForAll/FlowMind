@@ -179,14 +179,12 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   // Explicit focus management for the stdin input. `autoFocus` alone isn't
   // enough — it only fires on first mount, and anything that steals focus
   // (confirm dialog, clicking output, clicking Send) permanently pulls focus
-  // away, leaving the user typing into nothing. This effect refocuses the
-  // input whenever the run transitions into "running" state.
+  // away. This effect focuses the input when a run transitions into
+  // "running". useEffect runs AFTER React commits the DOM, so the ref is
+  // populated by then — no setTimeout needed.
   useEffect(() => {
     if (runStatus === "running" && activeRun?.kind === "run") {
-      // Small delay lets the input render before we focus it — without the
-      // delay the ref can still be null when the effect fires.
-      const id = setTimeout(() => stdinInputRef.current?.focus(), 0);
-      return () => clearTimeout(id);
+      stdinInputRef.current?.focus();
     }
   }, [runStatus, activeRun]);
 
