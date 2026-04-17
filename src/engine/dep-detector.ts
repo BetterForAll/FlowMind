@@ -72,3 +72,93 @@ export function detectNodeImports(content: string): string[] {
   }
   return Array.from(imports);
 }
+
+/**
+ * Filter `detectExternalDeps`'s output down to packages that aren't
+ * actually importable in the runtime the script will use. This is what
+ * the "Install" banner in the UI should consume — without it, the user
+ * sees "install requests" even when `requests` is already on the path,
+ * because the static import scanner has no idea what's installed.
+ *
+ * Strategy:
+ *   - Python: spawn `python -c` with importlib.util.find_spec for each
+ *     declared import. Fast (one subprocess), works against the SAME
+ *     interpreter we'd run the script with via pickCommand.
+ *   - Node:   spawn `node -e` running `require.resolve` from the script's
+ *     directory. Mirrors how the runner spawns the script, so package
+ *     resolution sees the same `node_modules` walk.
+ *
+ * Failures fall safe: if the interpreter can't be invoked at all (Python
+ * not installed, Node missing) we return the full declared list — the
+ * existing missing-interpreter banner will tell the user to install the
+ * runtime in the first place.
+ */
+export async function findMissingDeps(
+  content: string,
+  format: "python" | "nodejs",
+  scriptDir: string
+): Promise<string[]> {
+  const declared = detectExternalDeps(content, format);
+  if (declared.length === 0) return [];
+  return format === "python"
+    ? checkMissingPython(declared)
+    : checkMissingNode(declared, scriptDir);
+}
+
+async function checkMissingPython(packages: string[]): Promise<string[]> {
+  const { spawn } = await import("node:child_process");
+  const bin = process.platform === "win32" ? "python" : "python3";
+  // One subprocess, one line of stdout per missing package. find_spec
+  // returns None when the import isn't resolvable; we never actually
+  // import anything, so heavy/slow side-effecting modules don't run.
+  const code = [
+    "import importlib.util, sys",
+    "for p in sys.argv[1:]:",
+    "    if importlib.util.find_spec(p) is None:",
+    "        print(p)",
+  ].join("\n");
+  return new Promise<string[]>((resolve) => {
+    const child = spawn(bin, ["-c", code, ...packages], { shell: false, windowsHide: true });
+    let stdout = "";
+    child.stdout?.on("data", (c) => { stdout += c.toString("utf-8"); });
+    child.on("error", () => resolve(packages));
+    child.on("exit", (code) => {
+      if (code !== 0 && stdout.length === 0) {
+        // Couldn't run python at all — fall safe and assume missing.
+        resolve(packages);
+        return;
+      }
+      const missing = stdout
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      resolve(missing);
+    });
+  });
+}
+
+async function checkMissingNode(packages: string[], cwd: string): Promise<string[]> {
+  const { spawn } = await import("node:child_process");
+  // require.resolve throws if the module can't be resolved from the cwd.
+  // Wrap each in try/catch and print the name on failure — one line per
+  // missing package, easy to parse back.
+  const program = packages
+    .map(
+      (p) =>
+        `try { require.resolve(${JSON.stringify(p)}) } catch (e) { console.log(${JSON.stringify(p)}) }`
+    )
+    .join("\n");
+  return new Promise<string[]>((resolve) => {
+    const child = spawn("node", ["-e", program], { cwd, shell: false, windowsHide: true });
+    let stdout = "";
+    child.stdout?.on("data", (c) => { stdout += c.toString("utf-8"); });
+    child.on("error", () => resolve(packages));
+    child.on("exit", () => {
+      const missing = stdout
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      resolve(missing);
+    });
+  });
+}

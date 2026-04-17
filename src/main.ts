@@ -609,9 +609,14 @@ function setupIPC(): void {
   ipcMain.handle(
     "automations:getExternalDeps",
     async (_e, filePath: string, format: "python" | "nodejs") => {
+      // Only return packages that are actually MISSING from the runtime
+      // the script will use. Static import scanning alone produced
+      // false-positive install banners for users who already had the
+      // package installed.
       const content = await flowStore.readAutomation(filePath);
-      const { detectExternalDeps } = await import("./engine/dep-detector");
-      return detectExternalDeps(content, format);
+      const { findMissingDeps } = await import("./engine/dep-detector");
+      const pathMod = await import("node:path");
+      return findMissingDeps(content, format, pathMod.dirname(filePath));
     }
   );
 
