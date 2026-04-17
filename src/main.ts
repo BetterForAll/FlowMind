@@ -602,8 +602,15 @@ function setupIPC(): void {
   // the install prompt. Returns { ready, pythonAvailable, missing }.
   ipcMain.handle("automations:checkDesktopReady", async () => {
     const { spawn } = await import("node:child_process");
-    const { REQUIRED_DESKTOP_PACKAGES } = await import("./engine/agent-desktop");
+    const {
+      REQUIRED_DESKTOP_PACKAGES,
+      REQUIRED_DESKTOP_IMPORTS,
+      PIP_TO_IMPORT_NAME,
+    } = await import("./engine/agent-desktop");
     const bin = process.platform === "win32" ? "python" : "python3";
+    // Probe by IMPORT name (REQUIRED_DESKTOP_IMPORTS), then translate
+    // any missing imports BACK to pip names so the user-facing banner
+    // and the install command keep working with the install-time names.
     return new Promise<{ ready: boolean; pythonAvailable: boolean; missing: string[] }>(
       (resolve) => {
         const code = [
@@ -612,16 +619,25 @@ function setupIPC(): void {
           "    if importlib.util.find_spec(p) is None:",
           "        print(p)",
         ].join("\n");
-        const child = spawn(bin, ["-c", code, ...REQUIRED_DESKTOP_PACKAGES], {
+        const child = spawn(bin, ["-c", code, ...REQUIRED_DESKTOP_IMPORTS], {
           shell: false,
           windowsHide: true,
         });
         let stdout = "";
         child.stdout?.on("data", (c) => { stdout += c.toString("utf-8"); });
-        child.on("error", () => resolve({ ready: false, pythonAvailable: false, missing: REQUIRED_DESKTOP_PACKAGES }));
+        child.on("error", () =>
+          resolve({ ready: false, pythonAvailable: false, missing: REQUIRED_DESKTOP_PACKAGES })
+        );
         child.on("exit", (code) => {
           const pythonAvailable = code === 0 || stdout.length > 0;
-          const missing = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          const missingImports = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          // Reverse-lookup: turn import names like "PIL" back into the
+          // pip name "pillow" for the install command.
+          const importToPip: Record<string, string> = {};
+          for (const [pip, imp] of Object.entries(PIP_TO_IMPORT_NAME)) {
+            importToPip[imp] = pip;
+          }
+          const missing = missingImports.map((imp) => importToPip[imp] ?? imp);
           resolve({
             ready: pythonAvailable && missing.length === 0,
             pythonAvailable,

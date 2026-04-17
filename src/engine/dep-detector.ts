@@ -107,7 +107,21 @@ export async function findMissingDeps(
 
 async function checkMissingPython(packages: string[]): Promise<string[]> {
   const { spawn } = await import("node:child_process");
+  const { PIP_TO_IMPORT_NAME } = await import("./agent-desktop");
   const bin = process.platform === "win32" ? "python" : "python3";
+  // Translate pip names → import names before probing — pillow's import
+  // name is PIL, pyyaml's is yaml, etc. Without this, scripts that
+  // declare `import PIL` from a pip-installed pillow get falsely flagged
+  // as needing install. Reverse the mapping after to report missing
+  // packages in their pip-name form (what the user installs).
+  const importToPip: Record<string, string> = {};
+  for (const [pip, imp] of Object.entries(PIP_TO_IMPORT_NAME)) {
+    importToPip[imp] = pip;
+  }
+  const importNames = packages.map(
+    (p) => PIP_TO_IMPORT_NAME[p.toLowerCase()] ?? p
+  );
+
   // One subprocess, one line of stdout per missing package. find_spec
   // returns None when the import isn't resolvable; we never actually
   // import anything, so heavy/slow side-effecting modules don't run.
@@ -118,7 +132,7 @@ async function checkMissingPython(packages: string[]): Promise<string[]> {
     "        print(p)",
   ].join("\n");
   return new Promise<string[]>((resolve) => {
-    const child = spawn(bin, ["-c", code, ...packages], { shell: false, windowsHide: true });
+    const child = spawn(bin, ["-c", code, ...importNames], { shell: false, windowsHide: true });
     let stdout = "";
     child.stdout?.on("data", (c) => { stdout += c.toString("utf-8"); });
     child.on("error", () => resolve(packages));
@@ -128,10 +142,12 @@ async function checkMissingPython(packages: string[]): Promise<string[]> {
         resolve(packages);
         return;
       }
-      const missing = stdout
+      const missingImports = stdout
         .split(/\r?\n/)
         .map((l) => l.trim())
         .filter(Boolean);
+      // Map import names back to pip names where applicable.
+      const missing = missingImports.map((imp) => importToPip[imp] ?? imp);
       resolve(missing);
     });
   });

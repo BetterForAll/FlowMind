@@ -36,6 +36,31 @@ import type { Tool, ToolContext } from "./agent-types";
 const PYTHON_BIN = process.platform === "win32" ? "python" : "python3";
 const REQUIRED_PIP_PACKAGES = ["pywinauto", "uiautomation", "pyautogui", "pillow"];
 
+/**
+ * pip-name → import-name mapping for packages whose installable name
+ * differs from their Python import name. The readiness probe uses
+ * importlib.util.find_spec, which needs the import name. Without this,
+ * `find_spec("pillow")` returns None even when pillow is installed
+ * (the actual module is `PIL`), so the banner falsely flags it as
+ * missing forever.
+ *
+ * Add new entries here as the agent's tool surface grows. Common
+ * Python landmines: pillow→PIL, pyyaml→yaml, beautifulsoup4→bs4,
+ * opencv-python→cv2, scikit-learn→sklearn.
+ */
+export const PIP_TO_IMPORT_NAME: Record<string, string> = {
+  pillow: "PIL",
+};
+
+/** Translate a pip package name to the name used in `import X`. */
+export function pipNameToImportName(pipName: string): string {
+  return PIP_TO_IMPORT_NAME[pipName.toLowerCase()] ?? pipName;
+}
+
+/** Apply the mapping across an array, preserving order — used when
+ *  building the python -c argv list for the readiness probe. */
+export const REQUIRED_DESKTOP_IMPORTS = REQUIRED_PIP_PACKAGES.map(pipNameToImportName);
+
 interface DesktopSession {
   child: ChildProcessWithoutNullStreams;
   /** Pending JSON-RPC requests awaiting a reply, keyed by request id. */
