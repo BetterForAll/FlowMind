@@ -507,6 +507,9 @@ function setupIPC(): void {
         /** When true, every destructive Level 2 tool call pauses for
          *  user approval via the existing ask_user panel. */
         approveEachStep?: boolean;
+        /** When true, the agent's chromium browser launches in headed
+         *  mode so the user can watch the agent navigate. Default: headless. */
+        headedBrowser?: boolean;
       } = {}
     ) => {
       if (!agentExecutor) {
@@ -536,6 +539,7 @@ function setupIPC(): void {
             askUser: bridgeAgentAskUser,
             level: opts.level ?? 1,
             approveEachStep: opts.approveEachStep,
+            headedBrowser: opts.headedBrowser,
           });
 
           // On success, optionally synthesize and save as a replay script.

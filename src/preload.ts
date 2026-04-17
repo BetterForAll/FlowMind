@@ -70,6 +70,7 @@ const api = {
       format?: "python" | "nodejs";
       level?: 1 | 2;
       approveEachStep?: boolean;
+      headedBrowser?: boolean;
     }
   ) => ipcRenderer.invoke("automations:runAsAgent", flowId, params, opts ?? {}),
   answerAgentPrompt: (promptId: string, answer: string) =>

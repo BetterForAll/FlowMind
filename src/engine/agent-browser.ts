@@ -32,14 +32,17 @@ let activeSession: BrowserSession | null = null;
 /**
  * Lazily spawn (or reuse) the agent's browser session. Called via
  * ctx.getBrowser(). Headless by default so runs don't steal the user's
- * focus — we'll add a visible-mode toggle when the UX calls for it.
+ * focus — `{ headed: true }` opens a visible window so the user can
+ * watch the agent navigate, useful for debugging or first-time runs of
+ * a new flow. The flag is honoured only on first launch within a run;
+ * later getBrowser() calls return the existing session regardless.
  */
-export async function getOrCreateBrowser(): Promise<Page> {
+export async function getOrCreateBrowser(opts: { headed?: boolean } = {}): Promise<Page> {
   if (activeSession) return activeSession.page;
   // Lazy import so playwright's chromium launcher doesn't warm up until
   // a flow actually needs the browser.
   const { chromium } = await import("playwright");
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: !opts.headed });
   const context = await browser.newContext();
   const page = await context.newPage();
   activeSession = { browser, page };

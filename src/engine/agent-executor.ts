@@ -74,6 +74,10 @@ export interface AgentRunInput {
    *  before executing. Has no effect at Level 1 (no destructive tools).
    *  Surfaced as a checkbox in the agent-mode UI. */
   approveEachStep?: boolean;
+  /** When true, the agent's chromium browser launches in headed mode so
+   *  the user can watch each navigate/click happen live. Defaults to
+   *  headless — the agent's job is normally to be invisible. */
+  headedBrowser?: boolean;
 }
 
 export interface AgentRunResult {
@@ -146,7 +150,10 @@ export class AgentExecutor extends EventEmitter {
       flowBody: input.flow.body,
       params: input.params,
       askUser: (prompt, kind, choices) => input.askUser(runId, prompt, kind, choices),
-      getBrowser: () => getOrCreateBrowser(),
+      // Closure binds the headed flag at executor entry — the in-tool
+      // ctx.getBrowser() signature stays no-arg so individual tool
+      // implementations don't have to know about display preferences.
+      getBrowser: () => getOrCreateBrowser({ headed: !!input.headedBrowser }),
     };
 
     const tools = this.buildToolRegistry(level, input.model);

@@ -203,6 +203,16 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    *  show a spinner. Cleared by the run-event subscription when the pip
    *  install subprocess exits. */
   const [installingDesktopDeps, setInstallingDesktopDeps] = useState(false);
+  /** Per-run preference: launch the agent's chromium browser visible
+   *  (headed) so the user can watch what the agent does. Default off
+   *  — agents are usually meant to be invisible. Toggled by the
+   *  "Show browser" checkbox that appears in the param form when an
+   *  agent run is queued. */
+  const [headedBrowser, setHeadedBrowser] = useState(false);
+  /** Controls the collapsible "What do these modes do?" info panel
+   *  rendered above the Run button group. Lets the user compare the
+   *  four modes side-by-side without hover-tooltip whack-a-mole. */
+  const [runModesInfoOpen, setRunModesInfoOpen] = useState(false);
   /** Smart Run mode — when true, the renderer auto-escalates: tries the
    *  script first (with Stage 1 auto-fix), and if all patches exhaust,
    *  falls through to an agent run automatically. The user just clicks
@@ -820,14 +830,15 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       setPendingAgentFormat(a.format as "python" | "nodejs");
       return;
     }
-    kickOffAgentRun(a.format as "python" | "nodejs", {});
+    kickOffAgentRun(a.format as "python" | "nodejs", {}, 1, false, headedBrowser);
   };
 
   const kickOffAgentRun = async (
     format: "python" | "nodejs",
     params: Record<string, string>,
     level: 1 | 2 = 1,
-    approve = false
+    approve = false,
+    headed = false
   ) => {
     setAgentSteps([]);
     setAgentPrompt(null);
@@ -836,7 +847,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       const result = (await window.flowmind.runAsAgent(
         flowId,
         params,
-        { synthesize: true, format, level, approveEachStep: approve }
+        { synthesize: true, format, level, approveEachStep: approve, headedBrowser: headed }
       )) as { runId: string };
       setAgentRun({ runId: result.runId, format, status: "running" });
       setPendingAgentFormat(null);
@@ -909,7 +920,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       setPendingAgentLevel(2);
       return;
     }
-    kickOffAgentRun(a.format as "python" | "nodejs", {}, 2, approveEachStep);
+    kickOffAgentRun(a.format as "python" | "nodejs", {}, 2, approveEachStep, headedBrowser);
   };
 
   /** Trigger a fresh install of the desktop pip packages. The install
@@ -1467,6 +1478,77 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                   </div>
                 )}
 
+                {/* "What do these modes do?" — collapsible info panel
+                    that lays out the four Run modes side-by-side with
+                    their tool lists. Hidden by default to keep the
+                    surface uncluttered; the user can open it on demand. */}
+                {(a.format === "python" || a.format === "nodejs") && (
+                  <div style={{ marginBottom: 8 }}>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: "2px 10px", fontSize: 12 }}
+                      onClick={() => setRunModesInfoOpen((v) => !v)}
+                      title="What does each Run button do?"
+                    >
+                      {runModesInfoOpen ? "▼" : "▶"} What do these modes do?
+                    </button>
+                    {runModesInfoOpen && (
+                      <div
+                        style={{
+                          marginTop: 6,
+                          padding: 12,
+                          border: "1px solid var(--border)",
+                          borderRadius: 4,
+                          background: "var(--surface-hover)",
+                          fontSize: 12,
+                          display: "grid",
+                          gridTemplateColumns: "auto 1fr",
+                          gap: "8px 16px",
+                        }}
+                      >
+                        <strong>Run Script</strong>
+                        <span>
+                          Executes the pre-generated <code>.{a.format === "python" ? "py" : "js"}</code> file as-is.
+                          No LLM at runtime — fastest, cheapest. If it
+                          exits non-zero, ScriptDoctor patches it and
+                          retries automatically (up to 3 times).
+                        </span>
+
+                        <strong>Smart Run</strong>
+                        <span>
+                          Tries Run Script first; if all auto-fix retries
+                          fail, escalates to the agent (Level 1) and
+                          synthesizes a fresh script on success. Daily-use
+                          default — picks the cheapest path that works.
+                        </span>
+
+                        <strong>Run as Agent</strong>
+                        <span>
+                          Gemini drives real tools live: <em>files, HTTP,
+                          subprocesses, headless chromium, ask_user.</em>
+                          Does NOT touch your real mouse, keyboard, or
+                          windows — safe to keep using the computer
+                          while it runs. On success, the trace is saved
+                          as a replay script so the next run can use
+                          Run Script.
+                        </span>
+
+                        <strong>Run with All Tools</strong>
+                        <span>
+                          Adds the desktop layer on top of Run as Agent:
+                          <em> native window focus, real mouse/keyboard,
+                          control_click via UI Automation, vision-based
+                          coordinate clicks.</em> Drives your visible
+                          desktop — the agent will compete with you for
+                          mouse and keyboard, so don't use the computer
+                          while it runs. Requires Python + a few pip
+                          packages (the install banner walks you through it).
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="btn-group" style={{ marginBottom: 12 }}>
                   {(a.format === "python" || a.format === "nodejs") && (
                     activeRun && activeRun.format === a.format ? (
@@ -1608,7 +1690,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                               pendingAgentFormat,
                               paramDraft,
                               pendingAgentLevel,
-                              pendingAgentLevel === 2 ? approveEachStep : false
+                              pendingAgentLevel === 2 ? approveEachStep : false,
+                              headedBrowser
                             );
                           } else {
                             runAutomation(a, paramDraft);
@@ -1748,6 +1831,41 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       Approve every destructive step before it executes
                       <span style={{ color: "var(--text-muted)", marginLeft: 6 }}>
                         (clicks, types, key sends, app launches, focus changes)
+                      </span>
+                    </label>
+                  </div>
+                )}
+
+                {/* Show-browser toggle — visible whenever an agent run
+                    is queued (Level 1 or 2). Off = headless chromium
+                    (default; agent is invisible). On = headed chromium
+                    (a real browser window opens so the user can watch
+                    the agent navigate). Only relevant if the agent
+                    actually uses browser_* tools — otherwise this is a
+                    no-op. */}
+                {paramFormOpen && pendingAgentFormat && (
+                  <div
+                    style={{
+                      marginBottom: 8,
+                      padding: "8px 12px",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      fontSize: 13,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      id="headed-browser"
+                      checked={headedBrowser}
+                      onChange={(e) => setHeadedBrowser(e.target.checked)}
+                    />
+                    <label htmlFor="headed-browser" style={{ cursor: "pointer" }}>
+                      Show browser window
+                      <span style={{ color: "var(--text-muted)", marginLeft: 6 }}>
+                        (only if the agent actually opens chromium — useful for watching/debugging)
                       </span>
                     </label>
                   </div>
