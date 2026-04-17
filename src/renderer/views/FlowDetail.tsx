@@ -85,6 +85,10 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [externalDeps, setExternalDeps] = useState<Record<string, string[]>>({});
   const [stdinDraft, setStdinDraft] = useState("");
   const stdinInputRef = useRef<HTMLInputElement>(null);
+  // Parameter form state — filled in before Run, passed as CLI args to
+  // the script. One draft map per flow; keys are the parameter names.
+  const [paramDraft, setParamDraft] = useState<Record<string, string>>({});
+  const [paramFormOpen, setParamFormOpen] = useState(false);
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -322,7 +326,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     await navigator.clipboard.writeText(body);
   };
 
-  const runAutomation = async (a: AutomationFile) => {
+  const runAutomation = async (a: AutomationFile, paramsOverride?: Record<string, string>) => {
     if (a.format !== "python" && a.format !== "nodejs") return;
     const ok = confirm(
       `Run ${a.filename}?\n\n` +
@@ -338,13 +342,41 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     setSelectedLogContent(null);
     setSelectedLogPath(null);
     setRunStatus("running");
+    setParamFormOpen(false);
     try {
-      const result = (await window.flowmind.runAutomation(a.filePath, a.format as "python" | "nodejs")) as { runId: string };
+      const params = paramsOverride ?? paramDraft;
+      const result = (await window.flowmind.runAutomation(
+        a.filePath,
+        a.format as "python" | "nodejs",
+        params
+      )) as { runId: string };
       setActiveRun({ runId: result.runId, format: a.format as AutomationFormat, kind: "run" });
     } catch (err) {
       setRunStatus("error");
       setRunError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  /** Open the parameter entry form (if the flow has params) or run straight. */
+  const startRun = (a: AutomationFile) => {
+    const params = flow?.frontmatter.parameters ?? [];
+    if (params.length > 0) {
+      // Seed draft with existing values (so re-running keeps last entry) or
+      // the first observed_value as a suggestion.
+      setParamDraft((prev) => {
+        const next = { ...prev };
+        for (const p of params) {
+          if (!(p.name in next)) {
+            next[p.name] = p.observed_values?.[0] ?? "";
+          }
+        }
+        return next;
+      });
+      setParamFormOpen(true);
+      return;
+    }
+    // No params — run immediately.
+    runAutomation(a, {});
   };
 
   const killAutomation = async () => {
@@ -812,7 +844,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                     ) : (
                       <button
                         className="btn btn-primary"
-                        onClick={() => runAutomation(a)}
+                        onClick={() => startRun(a)}
                         disabled={!!activeRun}
                         title={activeRun ? "Another automation is currently running" : `Execute this ${a.format === "python" ? "Python" : "Node.js"} script`}
                       >
@@ -832,6 +864,100 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                   </button>
                   <button className="btn btn-danger" onClick={() => deleteAutomation(a)}>Delete</button>
                 </div>
+
+                {/* Parameter entry form — appears after clicking Run when the flow has parameters. Collects values upfront so the script runs non-interactively. */}
+                {paramFormOpen && (flow?.frontmatter.parameters?.length ?? 0) > 0 && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      padding: 14,
+                      border: "1px solid var(--accent)",
+                      borderRadius: 4,
+                      background: "var(--surface-hover)",
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+                      Run with these parameters
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                      Fill in the values. The script will run with each parameter passed as a CLI flag (e.g. <code>--subject Octopus</code>) and as a FLOWMIND_PARAM_* env var.
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      {flow!.frontmatter.parameters!.map((param) => (
+                        <div key={param.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <label style={{ fontSize: 12, fontWeight: 500 }}>
+                            <code>--{param.name}</code>
+                          </label>
+                          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                            {param.description}
+                          </div>
+                          <input
+                            type="text"
+                            value={paramDraft[param.name] ?? ""}
+                            onChange={(e) =>
+                              setParamDraft((prev) => ({ ...prev, [param.name]: e.target.value }))
+                            }
+                            placeholder={param.observed_values?.[0] ?? `Enter ${param.name}...`}
+                            style={{
+                              padding: "6px 10px",
+                              background: "var(--bg-code, rgba(0,0,0,0.25))",
+                              border: "1px solid var(--border)",
+                              borderRadius: 3,
+                              color: "var(--text)",
+                              fontFamily: "inherit",
+                              fontSize: 13,
+                            }}
+                          />
+                          {param.observed_values && param.observed_values.length > 1 && (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Previous:</span>
+                              {param.observed_values.slice(0, 4).map((v) => (
+                                <button
+                                  key={v}
+                                  onClick={() =>
+                                    setParamDraft((prev) => ({ ...prev, [param.name]: v }))
+                                  }
+                                  style={{
+                                    fontSize: 11,
+                                    padding: "2px 6px",
+                                    background: "var(--bg-code, rgba(0,0,0,0.2))",
+                                    border: "1px solid var(--border)",
+                                    borderRadius: 3,
+                                    cursor: "pointer",
+                                    color: "var(--text-muted)",
+                                    fontFamily: "inherit",
+                                  }}
+                                >
+                                  {v}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => runAutomation(a, paramDraft)}
+                        disabled={
+                          !!activeRun ||
+                          !(flow!.frontmatter.parameters!.every(
+                            (p) => (paramDraft[p.name] ?? "").trim().length > 0
+                          ))
+                        }
+                      >
+                        Run with these values
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => setParamFormOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Run output panel — appears once a run has started, persists after exit. */}
                 {(runStatus !== "idle" && (activeTab === "python" || activeTab === "nodejs")) && (
