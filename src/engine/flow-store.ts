@@ -103,6 +103,27 @@ export class FlowStore {
   }
 
   /**
+   * Atomically promote a partial flow to a complete flow:
+   *   1. Save the complete version to `flows/complete/`.
+   *   2. Unlink the original partial file on success.
+   *
+   * The complete frontmatter should have `type: "complete-flow"` and keep the
+   * original `id` so any code that tracked the partial flow by id continues
+   * to find it (now as a complete flow).
+   *
+   * Returns the new complete file path.
+   */
+  async promotePartialToComplete(
+    partialFilePath: string,
+    completeFrontmatter: FlowFrontmatter,
+    completeBody: string
+  ): Promise<string> {
+    const newPath = await this.saveFlow("complete", completeFrontmatter, completeBody);
+    await fsp.unlink(partialFilePath).catch(() => {});
+    return newPath;
+  }
+
+  /**
    * Merge evidence from a newly-detected flow into an existing flow file.
    * Only frontmatter metadata is updated (occurrences, last_seen,
    * source_windows, apps, and optionally the worth fields). The body is

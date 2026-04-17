@@ -498,10 +498,7 @@ Rules:
     };
     delete (newFrontmatter as Record<string, unknown>).gaps;
 
-    await this.store.saveFlow("complete", newFrontmatter, completeBody);
-    // Remove the partial flow file
-    const fsp = await import("node:fs/promises");
-    await fsp.unlink(flow.filePath).catch(() => {});
+    await this.store.promotePartialToComplete(flow.filePath, newFrontmatter, completeBody);
 
     return true;
   }
