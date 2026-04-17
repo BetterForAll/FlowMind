@@ -44,6 +44,34 @@ export interface DetectionResult {
   filesWritten: string[];
 }
 
+/**
+ * Decision from the evaluator pass for a single newly-detected flow.
+ * index — position of the flow in the corresponding `complete_flows` array.
+ * kind — either save as a new file ("new") or merge into an existing flow ("merge").
+ * matchedFlowId — id of the existing flow to merge into, required when kind === "merge".
+ * reason — 1-sentence justification, kept for logging and future debugging.
+ */
+export interface EvaluatorDecision {
+  index: number;
+  kind: "new" | "merge";
+  matchedFlowId?: string;
+  reason: string;
+}
+
+/**
+ * Full evaluator output. `complete` decisions are parallel to the
+ * `complete_flows` array from the detection phase. Partials are not
+ * merged in the MVP, so there's no `partial` field here.
+ *
+ * `withinRunDupes` lists newly-detected flows that describe the same
+ * activity emitted twice in the same run — the caller collapses them
+ * to one "new" flow before saving.
+ */
+export interface EvaluatorResult {
+  complete: EvaluatorDecision[];
+  withinRunDupes: { indexA: number; indexB: number; reason: string }[];
+}
+
 export interface InterviewQuestion {
   index: number;
   question: string;
