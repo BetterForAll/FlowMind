@@ -178,6 +178,23 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    *  the AGENT (not the script runner) for this format. Cleared when
    *  the agent kicks off or the form is dismissed. */
   const [pendingAgentFormat, setPendingAgentFormat] = useState<"python" | "nodejs" | null>(null);
+  /** Smart Run mode — when true, the renderer auto-escalates: tries the
+   *  script first (with Stage 1 auto-fix), and if all patches exhaust,
+   *  falls through to an agent run automatically. The user just clicks
+   *  one button; the trail of attempts streams into the live panel. */
+  const [smartRunMode, setSmartRunMode] = useState(false);
+  /** Mirror of pendingAgentFormat for Smart Run — needed because the
+   *  parameter-form submit handler has to know which orchestrator to
+   *  invoke once params are filled. */
+  const [pendingSmartRunFormat, setPendingSmartRunFormat] = useState<"python" | "nodejs" | null>(null);
+  /** Visible breadcrumb of which layers Smart Run has tried this round.
+   *  Rendered above the run panel so the user can see "Script failed →
+   *  Auto-fix exhausted → Running as agent…" without parsing the log. */
+  const [smartRunTrail, setSmartRunTrail] = useState<string[]>([]);
+  /** Last params used in this Smart Run chain — needed because the
+   *  agent-escalation step has to re-issue the run with the same values
+   *  the user originally submitted. */
+  const [smartRunParams, setSmartRunParams] = useState<Record<string, string>>({});
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -425,6 +442,17 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           ...prevOut,
           { stream: "stderr", data: `\n[auto-fix] ${ev.reason}\n` },
         ]);
+        // Smart Run escalation: if we got here because Smart Run was
+        // active and Stage 1 auto-fix gave up, transparently start an
+        // agent run with the same parameters. Done with a setTimeout(0)
+        // so React commits this auto-fix update first; otherwise the
+        // agent's first event would race the auto-fix terminal state.
+        if (smartRunMode && activeTab && (activeTab === "python" || activeTab === "nodejs")) {
+          setSmartRunTrail((prev) => [...prev, "Auto-fix exhausted — escalating to agent…"]);
+          setTimeout(() => {
+            kickOffAgentRun(activeTab, smartRunParams);
+          }, 0);
+        }
         return;
       }
       if (ev.type === "auto_fix_promoted") {
@@ -512,15 +540,31 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           });
           setAgentPromptAnswer("");
         } else if (ev.type === "agent_finished") {
+          // Smart Run lifecycle: agent is the last layer for now (Level 2
+          // doesn't exist yet). Whichever way it ended, the chain is over.
+          if (smartRunMode) {
+            setSmartRunTrail((prev) => [
+              ...prev,
+              ev.success ? "Agent succeeded — Smart Run complete." : `Agent failed: ${ev.reason}`,
+            ]);
+            setSmartRunMode(false);
+          }
           return {
             ...curr,
             status: ev.success ? (curr.synthesizedPath ? "saved" : "synthesizing") : "failed",
             reason: ev.reason,
           };
         } else if (ev.type === "agent_error") {
+          if (smartRunMode) {
+            setSmartRunTrail((prev) => [...prev, `Agent crashed: ${ev.error}`]);
+            setSmartRunMode(false);
+          }
           return { ...curr, status: "failed", reason: ev.error };
         } else if (ev.type === "agent_trace_saved") {
           if (flow?.frontmatter.name) loadAutomations(flow.frontmatter.name);
+          if (smartRunMode) {
+            setSmartRunTrail((prev) => [...prev, `Replay script saved → next Smart Run starts cheap.`]);
+          }
           return { ...curr, status: "saved", synthesizedPath: ev.filePath };
         } else if (ev.type === "agent_synthesize_failed") {
           return { ...curr, status: "failed", reason: `Synthesis failed: ${ev.reason}` };
@@ -645,6 +689,9 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       diagnosis: null,
       previousError: null,
     });
+    // Wipe the Smart Run breadcrumb unless the caller has reset/started
+    // their own chain (Smart Run sets the trail BEFORE invoking us).
+    if (!smartRunMode) setSmartRunTrail([]);
     try {
       const params = paramsOverride ?? paramDraft;
       const result = (await window.flowmind.runAutomation(
@@ -763,6 +810,65 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         status: "failed",
         reason: err instanceof Error ? err.message : String(err),
       });
+    }
+  };
+
+  /**
+   * Smart Run — single button, auto-escalating execution. Tries the
+   * cheapest layer that's available and falls through on failure:
+   *   - Script exists → run it (Stage 1 auto-fix kicks in transparently
+   *     for any failure). If all patches exhaust → fall through.
+   *   - No script, OR script + auto-fix all failed → agent run, which
+   *     also synthesizes a script on success so the next Smart Run can
+   *     start at the cheap layer again.
+   *
+   * The escalation logic is in the renderer (this hook + the auto_fix
+   * and agent event subscriptions) — no new IPC needed. main.ts treats
+   * each layer as an independent run; we just chain them here.
+   */
+  const startSmartRun = (a: AutomationFile) => {
+    if (a.format !== "python" && a.format !== "nodejs") return;
+    const ok = confirm(
+      `Smart Run ${a.filename}?\n\n` +
+        `FlowMind tries the cheapest path that works:\n` +
+        `  1. Run the existing script (with auto-fix on failure)\n` +
+        `  2. If that's exhausted, run as agent — Gemini drives real tools.\n\n` +
+        `On agent success, a fresh script is saved so the next run is cheap again.`
+    );
+    if (!ok) return;
+    const params = formParameters();
+    if (params.length > 0) {
+      setParamDraft((prev) => {
+        const next = { ...prev };
+        for (const p of params) {
+          if (!(p.name in next)) next[p.name] = p.observed_values?.[0] ?? "";
+        }
+        return next;
+      });
+      setParamFormOpen(true);
+      setPendingSmartRunFormat(a.format as "python" | "nodejs");
+      // Make sure the other pending flags don't leak in.
+      setPendingAgentFormat(null);
+      return;
+    }
+    kickOffSmartRun(a, {});
+  };
+
+  const kickOffSmartRun = (a: AutomationFile, params: Record<string, string>) => {
+    setSmartRunMode(true);
+    setSmartRunParams(params);
+    setSmartRunTrail(["Smart Run started"]);
+    setPendingSmartRunFormat(null);
+    if (a.filePath && a.format) {
+      // Script exists — start at Level 0. Stage 1 auto-fix handles
+      // failures transparently. If the entire chain fails, the
+      // auto_fix_failed event escalates us to Level 1 below.
+      setSmartRunTrail((prev) => [...prev, "Trying existing script…"]);
+      runAutomation(a, params);
+    } else {
+      // No script for this format → skip straight to Level 1.
+      setSmartRunTrail((prev) => [...prev, "No script — starting agent…"]);
+      kickOffAgentRun(a.format as "python" | "nodejs", params);
     }
   };
 
@@ -1254,17 +1360,25 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       <>
                         <button
                           className="btn btn-primary"
+                          onClick={() => startSmartRun(a)}
+                          disabled={!!activeRun || agentRun !== null}
+                          title="Smart Run: tries the script first (with auto-fix), escalates to agent on exhaustion. Cheapest path that works."
+                        >
+                          Smart Run
+                        </button>
+                        <button
+                          className="btn btn-secondary"
                           onClick={() => startRun(a)}
                           disabled={!!activeRun || agentRun !== null}
-                          title={activeRun ? "Another automation is currently running" : `Execute this ${a.format === "python" ? "Python" : "Node.js"} script`}
+                          title={activeRun ? "Another automation is currently running" : `Execute this ${a.format === "python" ? "Python" : "Node.js"} script directly (no agent escalation)`}
                         >
-                          Run Automation
+                          Run Script
                         </button>
                         <button
                           className="btn btn-secondary"
                           onClick={() => startAgentRun(a)}
                           disabled={!!activeRun || agentRun !== null}
-                          title="Run as an agent: Gemini calls real tools step-by-step instead of executing the pre-generated script. After success, the trace replaces the script with a known-good replay."
+                          title="Skip the script and run the agent directly. Gemini calls real tools step-by-step. After success, a fresh script is saved as the new primary."
                         >
                           Run as Agent
                         </button>
@@ -1359,10 +1473,12 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       <button
                         className="btn btn-primary"
                         onClick={() => {
-                          // If the user initiated Run-as-Agent earlier,
-                          // pendingAgentFormat is set — fire the agent
-                          // instead of the plain script runner.
-                          if (pendingAgentFormat) {
+                          // Routing priority: Smart Run > Agent > plain
+                          // script. Whichever pending flag is set decides
+                          // which orchestrator the form's submit fires.
+                          if (pendingSmartRunFormat) {
+                            kickOffSmartRun(a, paramDraft);
+                          } else if (pendingAgentFormat) {
                             kickOffAgentRun(pendingAgentFormat, paramDraft);
                           } else {
                             runAutomation(a, paramDraft);
@@ -1375,18 +1491,52 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                           ))
                         }
                       >
-                        {pendingAgentFormat ? "Run as Agent with these values" : "Run with these values"}
+                        {pendingSmartRunFormat
+                          ? "Smart Run with these values"
+                          : pendingAgentFormat
+                          ? "Run as Agent with these values"
+                          : "Run with these values"}
                       </button>
                       <button
                         className="btn btn-secondary"
                         onClick={() => {
                           setParamFormOpen(false);
                           setPendingAgentFormat(null);
+                          setPendingSmartRunFormat(null);
                         }}
                       >
                         Cancel
                       </button>
                     </div>
+                  </div>
+                )}
+
+                {/* Smart Run breadcrumb — shows the escalation trail
+                    (Script → Auto-fix → Agent) at a glance. Visible
+                    whenever Smart Run was used this round; cleared on
+                    the next Run / Run Script / Run as Agent click. */}
+                {smartRunTrail.length > 0 && (activeTab === "python" || activeTab === "nodejs") && (
+                  <div
+                    style={{
+                      marginBottom: 8,
+                      padding: "8px 12px",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      background: "rgba(52, 211, 153, 0.05)",
+                      fontSize: 12,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <strong style={{ color: "var(--green, #2ecc71)" }}>Smart Run:</strong>
+                    {smartRunTrail.map((step, i) => (
+                      <span key={i} style={{ color: "var(--text-muted)" }}>
+                        {i > 0 && <span style={{ marginRight: 6 }}>→</span>}
+                        {step}
+                      </span>
+                    ))}
                   </div>
                 )}
 
