@@ -7,6 +7,7 @@ import { DescriptionStore, type DescriptionDocument } from "./description-store"
 import { FlowEvaluator, type NewlyDetectedFlow } from "./evaluator";
 import { WorthJudge, type FlowForJudgment, type WorthVerdict } from "./worth-judge";
 import { GapCloser, extractQuestions, insertAnswersAndRewriteQuestions } from "./gap-closer";
+import { PartialElevator } from "./partial-elevator";
 import { loadConfig } from "../config";
 import { getEffectiveSettings } from "../ai/mode-presets";
 import type {
@@ -107,6 +108,7 @@ export class FlowDetectionEngine {
   private evaluator: FlowEvaluator;
   private worthJudge: WorthJudge;
   private gapCloser: GapCloser;
+  private partialElevator: PartialElevator;
   private running = false;
 
   constructor(store: FlowStore, descriptionStore: DescriptionStore) {
@@ -121,6 +123,7 @@ export class FlowDetectionEngine {
     this.evaluator = new FlowEvaluator();
     this.worthJudge = new WorthJudge();
     this.gapCloser = new GapCloser();
+    this.partialElevator = new PartialElevator();
   }
 
   isRunning(): boolean {
@@ -158,6 +161,37 @@ export class FlowDetectionEngine {
 
       // 3. Single Gemini call (text + key screenshots only)
       const analysis = await this.analyzeWithGemini(settings.detectionModel, windowParts, settings.thinking);
+
+      // 3b. Partial elevator — for each partial just emitted by phase 2, ask
+      //     the model whether a LATER window in this same run shows the
+      //     outcome being reached. If yes, replace the partial with a
+      //     complete flow covering the whole sequence. This fixes the case
+      //     where phase 2 cuts a flow too early at the "search struggle"
+      //     portion and misses the later save/outcome.
+      if ((analysis.partial_flows ?? []).length > 0) {
+        const verdicts = await this.partialElevator.elevateAll(
+          analysis.partial_flows ?? [],
+          descriptions,
+          settings.detectionModel
+        );
+        const elevatedCompletes: typeof analysis.complete_flows = [];
+        const survivingPartials: typeof analysis.partial_flows = [];
+        const original = analysis.partial_flows ?? [];
+        for (let i = 0; i < original.length; i++) {
+          const v = verdicts[i];
+          if (v && v.elevate) {
+            elevatedCompletes!.push(v.completeFlow);
+            console.log(`[Elevator] Elevated partial "${original[i].name}" → complete (later window shows outcome)`);
+          } else {
+            survivingPartials!.push(original[i]);
+            if (v) console.log(`[Elevator] Kept "${original[i].name}" as partial: ${v.reason}`);
+          }
+        }
+        if (elevatedCompletes!.length > 0) {
+          analysis.complete_flows = [...(analysis.complete_flows ?? []), ...elevatedCompletes!];
+        }
+        analysis.partial_flows = survivingPartials;
+      }
 
       // 4. Autonomous gap-closure pass on existing partial flows. This runs
       //    BEFORE the matcher so that partials promoted to complete this run
