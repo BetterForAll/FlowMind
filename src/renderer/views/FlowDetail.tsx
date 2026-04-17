@@ -203,6 +203,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    *  show a spinner. Cleared by the run-event subscription when the pip
    *  install subprocess exits. */
   const [installingDesktopDeps, setInstallingDesktopDeps] = useState(false);
+  /** When the user clicked "Run with All Tools" but the readiness probe
+   *  failed and we kicked off an install, this remembers the
+   *  AutomationFile they wanted to run so we can resume the launch
+   *  automatically the moment the install succeeds. Without it, the
+   *  user has to click "Run with All Tools" a second time after install
+   *  — confusing because they expressed the intent only once. */
+  const [pendingLevel2Launch, setPendingLevel2Launch] = useState<AutomationFile | null>(null);
   /** Per-run preference: launch the agent's chromium browser visible
    *  (headed) so the user can watch what the agent does. Default off
    *  — agents are usually meant to be invisible. Toggled by the
@@ -372,16 +379,35 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
             const a = automationsByFormat[current.format];
             if (a) reloadExternalDeps(a.filePath, current.format);
             // If the desktop-deps install was the one in flight, re-probe
-            // readiness so the install banner clears and the user can
-            // re-click "Run with All Tools".
+            // readiness so the install banner clears, AND auto-continue
+            // the Run-with-All-Tools launch the user originally requested.
+            // Without the auto-continue the user would have to click the
+            // button again — confusing because they already expressed
+            // intent once.
             if (installingDesktopDeps) {
               setInstallingDesktopDeps(false);
-              window.flowmind.checkDesktopReady().then((s) => setDesktopReady(s as { ready: boolean; pythonAvailable: boolean; missing: string[] }));
+              (async () => {
+                const s = (await window.flowmind.checkDesktopReady()) as {
+                  ready: boolean;
+                  pythonAvailable: boolean;
+                  missing: string[];
+                };
+                setDesktopReady(s);
+                if (s.ready && pendingLevel2Launch) {
+                  const target = pendingLevel2Launch;
+                  setPendingLevel2Launch(null);
+                  // Defer to next tick so the readiness state commit
+                  // before the relaunch reads it.
+                  setTimeout(() => startAgentRunWithAllTools(target, true), 0);
+                }
+              })();
             }
           } else if (current.kind === "install" && installingDesktopDeps) {
             // Install failed/timed-out — keep the banner up so the user
-            // sees what happened. Clear the in-flight flag.
+            // sees what happened. Clear the in-flight flag and abandon
+            // any pending auto-launch (the user can retry manually).
             setInstallingDesktopDeps(false);
+            setPendingLevel2Launch(null);
           }
           return null; // run is done
         }
@@ -389,7 +415,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       });
     });
     return unsubscribe;
-  }, [flow, automationsByFormat, reloadLogsForFormat, reloadExternalDeps, installingDesktopDeps]);
+  }, [flow, automationsByFormat, reloadLogsForFormat, reloadExternalDeps, installingDesktopDeps, pendingLevel2Launch]);
 
   // Subscribe to auto-fix events (main-side orchestration). These ride a
   // separate channel from the raw runner events so they're easy to filter.
@@ -866,25 +892,33 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   /**
    * Stage 3 entry point — "Run with All Tools". Probes the Python
    * desktop helper first; if any pieces are missing, surfaces an
-   * install banner and bails. Otherwise routes through the same
-   * agent path with level=2 enabled.
+   * install banner AND remembers the user's launch intent so the run
+   * resumes automatically once the install succeeds. Otherwise routes
+   * through the same agent path with level=2 enabled.
+   *
+   * `_skipConfirm` is set when this function is called by the auto-
+   * resume path after an install — the user already confirmed once
+   * and shouldn't have to click through the dialog a second time.
    */
-  const startAgentRunWithAllTools = async (a: AutomationFile) => {
+  const startAgentRunWithAllTools = async (a: AutomationFile, _skipConfirm = false) => {
     if (a.format !== "python" && a.format !== "nodejs") return;
-    const ok = confirm(
-      `Run with ALL tools (Stage 3)?\n\n` +
-        `Adds desktop UI Automation (window focus, keyboard, mouse, ` +
-        `vision-based clicks) on top of the Stage 2 agent. The agent ` +
-        `can drive native Windows apps directly — make sure you trust ` +
-        `the flow before proceeding.\n\n` +
-        `Tip: turn on "Approve each step" if this is your first try ` +
-        `with this flow.`
-    );
-    if (!ok) return;
+    if (!_skipConfirm) {
+      const ok = confirm(
+        `Run with ALL tools (Stage 3)?\n\n` +
+          `Adds desktop UI Automation (window focus, keyboard, mouse, ` +
+          `vision-based clicks) on top of the Stage 2 agent. The agent ` +
+          `can drive native Windows apps directly — make sure you trust ` +
+          `the flow before proceeding.\n\n` +
+          `Tip: turn on "Approve each step" if this is your first try ` +
+          `with this flow.`
+      );
+      if (!ok) return;
+    }
 
     // Readiness check — Python + pywinauto + uiautomation + pyautogui +
     // pillow all need to be importable. If anything's missing, surface
-    // the install banner and abort the launch.
+    // the install banner AND remember the launch intent so the install-
+    // complete handler can resume this run automatically.
     try {
       const status = (await window.flowmind.checkDesktopReady()) as {
         ready: boolean;
@@ -893,7 +927,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       };
       setDesktopReady(status);
       if (!status.ready) {
-        // Don't kick off the agent — the user needs to install first.
+        setPendingLevel2Launch(a);
         return;
       }
     } catch (err) {
@@ -1768,6 +1802,11 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         </>
                       )}
                     </div>
+                    {pendingLevel2Launch && (
+                      <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                        Your <strong>Run with All Tools</strong> request will resume automatically once the install finishes.
+                      </div>
+                    )}
                     <div style={{ display: "flex", gap: 6 }}>
                       {desktopReady.pythonAvailable && desktopReady.missing.length > 0 && (
                         <button
@@ -1796,7 +1835,10 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       <button
                         className="btn btn-secondary"
                         style={{ padding: "4px 12px", fontSize: 12 }}
-                        onClick={() => setDesktopReady(null)}
+                        onClick={() => {
+                          setDesktopReady(null);
+                          setPendingLevel2Launch(null);
+                        }}
                       >
                         Dismiss
                       </button>
