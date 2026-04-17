@@ -19,6 +19,8 @@ interface Settings {
   screenshotResolution: { width: number; height: number } | null;
   screenshotQuality: number | null;
   geminiApiKey: string | null;
+  autoFixOnFailure: boolean;
+  autoFixMaxRetries: number;
 }
 
 const MODE_INFO: Record<FlowMode, { label: string; desc: string }> = {
@@ -201,6 +203,41 @@ export function SettingsView() {
             </select>
           </label>
         </div>
+      </div>
+
+      {/* Auto-fix */}
+      <div className="settings-section">
+        <h2 className="settings-heading">Auto-fix failing scripts</h2>
+        <p className="settings-desc">
+          When a generated python/Node.js automation exits non-zero, FlowMind
+          can automatically invoke ScriptDoctor (same model as generation) to
+          diagnose the error and produce a patched version, then retry. The
+          original script is never overwritten — patches land at
+          <code> &lt;slug&gt;-&lt;format&gt;.v&lt;N&gt;.&lt;ext&gt;</code> next
+          to it, and a working patch can be promoted on explicit user action.
+        </p>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={settings.autoFixOnFailure}
+            onChange={(e) => update({ autoFixOnFailure: e.target.checked })}
+          />
+          Automatically patch and retry failing scripts
+        </label>
+        <label className="settings-label">
+          Max retries per run
+          <select
+            className="settings-select"
+            value={settings.autoFixMaxRetries}
+            onChange={(e) => update({ autoFixMaxRetries: parseInt(e.target.value, 10) })}
+            disabled={!settings.autoFixOnFailure}
+          >
+            <option value={1}>1 retry</option>
+            <option value={2}>2 retries</option>
+            <option value={3}>3 retries</option>
+            <option value={5}>5 retries</option>
+          </select>
+        </label>
       </div>
 
       {/* Analysis Frequency */}

@@ -88,7 +88,14 @@ export class AutomationRunner extends EventEmitter {
      * generated script to read them whichever way the LLM chose (argparse,
      * os.getenv, etc.). Empty object → no params, no args, no env vars.
      */
-    params: Record<string, string> = {}
+    params: Record<string, string> = {},
+    /**
+     * Optional retry metadata — recorded in the run-log header so the user
+     * (and any diff tool) can tell an auto-fix retry apart from a normal
+     * run. `attempt` is 1 for the original run, 2+ for auto-fix retries.
+     * `previousError` is a short summary of why the prior run failed.
+     */
+    retryMeta?: { attempt: number; previousError?: string; patchFromPath?: string }
   ): string {
     // Security: only run files that live inside ~/flowtracker/automations.
     const resolved = path.resolve(filePath);
@@ -117,8 +124,13 @@ export class AutomationRunner extends EventEmitter {
 
     // Log file location: <automations>/logs/<script-slug>/<format>-<timestamp>.log.
     // We extract the flow-slug from the script filename, which follows
-    // FlowStore.saveAutomation's "<slug>-<format>.<ext>" convention.
-    const scriptBase = path.basename(resolved).replace(/\.[a-z0-9]+$/i, "");
+    // FlowStore.saveAutomation's "<slug>-<format>.<ext>" convention. For
+    // auto-fix patches (`<slug>-<format>.v<N>.<ext>`) we strip the `.v<N>`
+    // segment so retry runs land in the same "Previous runs" folder as the
+    // primary script — otherwise the UI would split them into separate
+    // per-version buckets and the retry chain becomes hard to follow.
+    const scriptBaseRaw = path.basename(resolved).replace(/\.[a-z0-9]+$/i, "");
+    const scriptBase = scriptBaseRaw.replace(/\.v\d+$/i, "");
     const logSubdir = path.join(LOGS_DIR, scriptBase);
     fs.mkdirSync(logSubdir, { recursive: true });
     const logFilePath = path.join(
@@ -138,6 +150,17 @@ export class AutomationRunner extends EventEmitter {
         `# run_id: ${runId}`,
         ...(Object.keys(params).length > 0
           ? [`# params: ${JSON.stringify(params)}`]
+          : []),
+        ...(retryMeta
+          ? [
+              `# retry_attempt: ${retryMeta.attempt}`,
+              ...(retryMeta.previousError
+                ? [`# previous_error: ${retryMeta.previousError.replace(/\n/g, " ").slice(0, 500)}`]
+                : []),
+              ...(retryMeta.patchFromPath
+                ? [`# patched_from: ${retryMeta.patchFromPath}`]
+                : []),
+            ]
           : []),
         ``,
         ``,

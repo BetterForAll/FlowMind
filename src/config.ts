@@ -32,6 +32,15 @@ export interface AppConfig {
   screenshotQuality: number | null;
   // API key (optional — falls back to GEMINI_API_KEY env var)
   geminiApiKey: string | null;
+  /**
+   * Automatically invoke ScriptDoctor + retry when a python/nodejs automation
+   * exits non-zero. Patched scripts are written as `<slug>-<format>.vN.<ext>`
+   * next to the primary file; the primary is never overwritten automatically.
+   * The user can promote a working patch to primary later. Default: on.
+   */
+  autoFixOnFailure: boolean;
+  /** Maximum number of automatic patch-and-retry attempts per run. */
+  autoFixMaxRetries: number;
 }
 
 const DEFAULTS: AppConfig = {
@@ -51,6 +60,8 @@ const DEFAULTS: AppConfig = {
   screenshotResolution: null,
   screenshotQuality: null,
   geminiApiKey: null,
+  autoFixOnFailure: true,
+  autoFixMaxRetries: 3,
 };
 
 let cachedConfig: AppConfig | null = null;

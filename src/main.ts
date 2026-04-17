@@ -13,6 +13,8 @@ import { InterviewEngine } from "./engine/interview";
 import { DescribeEngine } from "./engine/describe";
 import { DescriptionStore } from "./engine/description-store";
 import { AutomationRunner, type RunEvent } from "./engine/automation-runner";
+import { AutoFixOrchestrator, type AutoFixEvent } from "./engine/auto-fix-orchestrator";
+import { ScriptDoctor } from "./engine/script-doctor";
 import { CaptureOrchestrator } from "./capture/orchestrator";
 import { CaptureStorage } from "./capture/storage";
 import { loadConfig, saveConfig, type AppConfig } from "./config";
@@ -29,6 +31,7 @@ let descriptionStore: DescriptionStore;
 let describeEngine: DescribeEngine;
 let interviewEngine: InterviewEngine;
 let automationRunner: AutomationRunner;
+let autoFixOrchestrator: AutoFixOrchestrator | null = null;
 let captureOrchestrator: CaptureOrchestrator;
 let describeInterval: ReturnType<typeof setInterval> | null = null;
 let analyzeInterval: ReturnType<typeof setInterval> | null = null;
@@ -386,15 +389,58 @@ function setupIPC(): void {
       _e,
       filePath: string,
       format: "python" | "nodejs",
-      params?: Record<string, string>
+      params?: Record<string, string>,
+      flowId?: string
     ) => {
       if (format !== "python" && format !== "nodejs") {
         throw new Error(`Run is only supported for python and nodejs automations (got ${format})`);
       }
       // AutomationRunner validates the path; throwing bubbles up to the renderer.
-      return { runId: automationRunner.run(filePath, format, undefined, params ?? {}) };
+      const runId = automationRunner.run(filePath, format, undefined, params ?? {});
+
+      // Register the run with the auto-fix orchestrator so a non-zero exit
+      // triggers the ScriptDoctor automatically (user preference). We need
+      // flowId to resolve the flow body + parameters when the doctor is
+      // invoked. Older callers may omit it — in that case we still run the
+      // script, we just can't auto-fix. If the orchestrator couldn't be
+      // constructed (missing API key), we skip silently.
+      if (flowId && autoFixOrchestrator) {
+        const flow = await flowStore.getFlowById(flowId);
+        if (flow) {
+          const pathMod = await import("node:path");
+          const ext = pathMod.extname(filePath).replace(/^\./, "") || (format === "python" ? "py" : "js");
+          autoFixOrchestrator.track(runId, {
+            flowId,
+            flowName: flow.frontmatter.name,
+            flowBody: flow.body,
+            parameters: flow.frontmatter.parameters ?? [],
+            filePath,
+            format,
+            params: params ?? {},
+            attempt: 1,
+            ext,
+          });
+        }
+      }
+
+      return { runId };
     }
   );
+
+  // Manual opt-out — user clicked "don't auto-fix this run" after seeing the
+  // script fail. Prevents the orchestrator from kicking in on this run's
+  // exit event.
+  ipcMain.handle("automations:disableAutoFix", async (_e, runId: string) => {
+    autoFixOrchestrator?.disableForRun(runId);
+  });
+
+  // Promote a patched script (`<slug>-<format>.vN.<ext>`) to the primary
+  // slot — overwrites the primary, deletes the patch. Called when the user
+  // approves an auto-fix result as the new canonical version.
+  ipcMain.handle("automations:promotePatch", async (_e, patchPath: string) => {
+    const primaryPath = await flowStore.promotePatchToPrimary(patchPath);
+    return { primaryPath };
+  });
 
   ipcMain.handle("automations:kill", async (_e, runId: string) => {
     return { killed: automationRunner.kill(runId) };
@@ -488,6 +534,48 @@ app.whenReady().then(async () => {
   automationRunner.on("event", (event: RunEvent) => {
     mainWindow?.webContents.send("automations:event", event);
   });
+
+  // Auto-fix orchestrator: watches for non-zero exits and, if the user has
+  // auto-fix enabled, invokes ScriptDoctor + retries with a versioned patch.
+  // Its events ride the same channel as runner events so the renderer has
+  // a single subscription point. We gate on GEMINI_API_KEY since the doctor
+  // needs it — without a key, new AutoFixOrchestrator would throw.
+  try {
+    const doctor = new ScriptDoctor();
+    autoFixOrchestrator = new AutoFixOrchestrator(
+      automationRunner,
+      flowStore,
+      doctor,
+      async () => {
+        const c = await loadConfig();
+        return getEffectiveSettings(c).automationModel;
+      },
+      async () => {
+        const c = await loadConfig();
+        return {
+          enabled: c.autoFixOnFailure,
+          maxRetries: c.autoFixMaxRetries,
+        };
+      },
+      async (flowId: string) => {
+        const f = await flowStore.getFlowById(flowId);
+        if (!f) return null;
+        return {
+          name: f.frontmatter.name,
+          body: f.body,
+          parameters: f.frontmatter.parameters ?? [],
+        };
+      }
+    );
+    autoFixOrchestrator.on("event", (event: AutoFixEvent) => {
+      mainWindow?.webContents.send("automations:autoFixEvent", event);
+    });
+  } catch (err) {
+    console.warn(
+      "[FlowMind] Auto-fix disabled — ScriptDoctor init failed:",
+      err instanceof Error ? err.message : err
+    );
+  }
   captureOrchestrator = new CaptureOrchestrator();
 
   // Forward capture stats to renderer

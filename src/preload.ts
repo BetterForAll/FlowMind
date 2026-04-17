@@ -54,8 +54,13 @@ const api = {
   runAutomation: (
     filePath: string,
     format: "python" | "nodejs",
-    params?: Record<string, string>
-  ) => ipcRenderer.invoke("automations:run", filePath, format, params),
+    params?: Record<string, string>,
+    flowId?: string
+  ) => ipcRenderer.invoke("automations:run", filePath, format, params, flowId),
+  disableAutoFix: (runId: string) =>
+    ipcRenderer.invoke("automations:disableAutoFix", runId),
+  promotePatch: (patchPath: string) =>
+    ipcRenderer.invoke("automations:promotePatch", patchPath),
   killAutomation: (runId: string) =>
     ipcRenderer.invoke("automations:kill", runId),
   sendInputToAutomation: (runId: string, text: string) =>
@@ -108,6 +113,14 @@ const api = {
     ipcRenderer.on("automations:event", listener);
     return () => {
       ipcRenderer.removeListener("automations:event", listener);
+    };
+  },
+  onAutoFixEvent: (callback: (event: unknown) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, fixEvent: unknown) =>
+      callback(fixEvent);
+    ipcRenderer.on("automations:autoFixEvent", listener);
+    return () => {
+      ipcRenderer.removeListener("automations:autoFixEvent", listener);
     };
   },
 

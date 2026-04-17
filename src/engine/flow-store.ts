@@ -330,6 +330,82 @@ export class FlowStore {
     return path.join(this.baseDir, "automations", `${slug}-${format}.${ext}`);
   }
 
+  /**
+   * Save a ScriptDoctor-produced patch as a versioned sibling of the primary
+   * automation file. The primary file (`<slug>-<format>.<ext>`) is never
+   * overwritten automatically — patches land at
+   * `<slug>-<format>.v<N>.<ext>` where N is the next free integer (>= 2,
+   * since the primary is treated as v1). If a file at the chosen path
+   * already exists (from a previous session), the next free integer is
+   * selected.
+   *
+   * Returns the absolute path written. Does NOT mutate the primary file.
+   */
+  async saveAutomationPatch(
+    flowName: string,
+    format: string,
+    ext: string,
+    content: string
+  ): Promise<string> {
+    const slug = this.slugify(flowName);
+    const dir = path.join(this.baseDir, "automations");
+    await fsp.mkdir(dir, { recursive: true });
+    const nextVersion = await this.nextPatchVersion(slug, format, ext);
+    const filename = `${slug}-${format}.v${nextVersion}.${ext}`;
+    const filePath = path.join(dir, filename);
+    await fsp.writeFile(filePath, content, "utf-8");
+    return filePath;
+  }
+
+  /**
+   * Promote a patched script to the primary slot — overwrites the primary
+   * file with the patched content and deletes the patch file. Callers use
+   * this when the user explicitly marks a working patch as the new canonical
+   * script.
+   */
+  async promotePatchToPrimary(patchPath: string): Promise<string> {
+    const automationsDir = path.join(this.baseDir, "automations");
+    const resolved = path.resolve(patchPath);
+    if (!resolved.startsWith(path.resolve(automationsDir))) {
+      throw new Error("Refusing to promote file outside automations directory");
+    }
+    const basename = path.basename(resolved);
+    // Expect filename pattern <slug>-<format>.v<N>.<ext>
+    const m = basename.match(/^(.+)-([a-z-]+)\.v(\d+)\.([a-z0-9]+)$/);
+    if (!m) {
+      throw new Error(`Not a patch file (pattern <slug>-<format>.v<N>.<ext>): ${basename}`);
+    }
+    const [, slug, format, , ext] = m;
+    const primaryPath = path.join(automationsDir, `${slug}-${format}.${ext}`);
+    const content = await fsp.readFile(resolved, "utf-8");
+    await fsp.writeFile(primaryPath, content, "utf-8");
+    await fsp.unlink(resolved).catch(() => {});
+    return primaryPath;
+  }
+
+  /**
+   * Return the highest integer N such that `<slug>-<format>.v<N>.<ext>`
+   * exists on disk, plus 1. If no patches exist, returns 2 (since the primary
+   * is conceptually v1).
+   */
+  private async nextPatchVersion(slug: string, format: string, ext: string): Promise<number> {
+    const dir = path.join(this.baseDir, "automations");
+    if (!fs.existsSync(dir)) return 2;
+    const files = await fsp.readdir(dir);
+    const pattern = new RegExp(
+      `^${escapeRegExp(slug)}-${escapeRegExp(format)}\\.v(\\d+)\\.${escapeRegExp(ext)}$`
+    );
+    let max = 1;
+    for (const f of files) {
+      const m = f.match(pattern);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n > max) max = n;
+      }
+    }
+    return max + 1;
+  }
+
   async readAutomation(filePath: string): Promise<string> {
     const automationsDir = path.join(this.baseDir, "automations");
     const resolved = path.resolve(filePath);

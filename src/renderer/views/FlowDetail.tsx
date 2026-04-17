@@ -112,6 +112,20 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   // the script. One draft map per flow; keys are the parameter names.
   const [paramDraft, setParamDraft] = useState<Record<string, string>>({});
   const [paramFormOpen, setParamFormOpen] = useState(false);
+  // Auto-fix progress across a chain of retries. `phase` drives the visible
+  // status; `attempt` is 1-indexed (1 = original run, 2+ = auto-fix retries).
+  const [autoFixState, setAutoFixState] = useState<{
+    phase: "idle" | "diagnosing" | "retrying" | "exhausted" | "disabled";
+    attempt: number;
+    maxRetries: number;
+    patchPath: string | null;
+    reason: string | null;
+  }>({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null });
+  // Params used on the current run chain — kept so the UI can show what
+  // values the latest retry was invoked with (values are held in main
+  // between retries; this mirror is purely informational).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_lastRunParams, setLastRunParams] = useState<Record<string, string>>({});
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -262,6 +276,97 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     return unsubscribe;
   }, [flow, automationsByFormat, reloadLogsForFormat, reloadExternalDeps]);
 
+  // Subscribe to auto-fix events (main-side orchestration). These ride a
+  // separate channel from the raw runner events so they're easy to filter.
+  useEffect(() => {
+    interface AutoFixPending {
+      type: "auto_fix_pending";
+      runId: string;
+      attempt: number;
+      maxRetries: number;
+    }
+    interface AutoFixRetryStarted {
+      type: "auto_fix_retry_started";
+      oldRunId: string;
+      newRunId: string;
+      attempt: number;
+      maxRetries: number;
+      patchPath: string;
+      previousError: string;
+    }
+    interface AutoFixFailed {
+      type: "auto_fix_failed";
+      runId: string;
+      reason: string;
+      attempt: number;
+    }
+    type Ev = AutoFixPending | AutoFixRetryStarted | AutoFixFailed;
+
+    const unsubscribe = window.flowmind.onAutoFixEvent((raw: unknown) => {
+      const ev = raw as Ev;
+      if (ev.type === "auto_fix_pending") {
+        setAutoFixState({
+          phase: "diagnosing",
+          attempt: ev.attempt,
+          maxRetries: ev.maxRetries,
+          patchPath: null,
+          reason: null,
+        });
+        // Keep the run panel visible; don't reset runStatus here. The
+        // prior run's "exit" event will have set it to "completed" or
+        // similar — we override the header rendering based on phase.
+        setRunOutput((prev) => [
+          ...prev,
+          {
+            stream: "stdout",
+            data: `\n[auto-fix] Run failed — invoking ScriptDoctor (attempt ${ev.attempt}/${ev.maxRetries + 1})...\n`,
+          },
+        ]);
+        return;
+      }
+      if (ev.type === "auto_fix_retry_started") {
+        setAutoFixState({
+          phase: "retrying",
+          attempt: ev.attempt,
+          maxRetries: ev.maxRetries,
+          patchPath: ev.patchPath,
+          reason: null,
+        });
+        // Switch the active run to the new runId. Keep the prior output so
+        // the user can scroll up and see what the original run did before
+        // the retry was spawned.
+        setActiveRun((curr) => {
+          const format = curr?.format ?? (ev.patchPath.endsWith(".py") ? "python" : "nodejs");
+          return { runId: ev.newRunId, format, kind: "run" };
+        });
+        setRunStatus("running");
+        setRunExitCode(null);
+        setRunError(null);
+        setRunOutput((prev) => [
+          ...prev,
+          {
+            stream: "stdout",
+            data: `\n[auto-fix] Patched script ready at ${ev.patchPath}\n[auto-fix] Retrying (attempt ${ev.attempt}/${ev.maxRetries + 1})...\n`,
+          },
+        ]);
+        return;
+      }
+      if (ev.type === "auto_fix_failed") {
+        setAutoFixState((prev) => ({
+          ...prev,
+          phase: "exhausted",
+          reason: ev.reason,
+        }));
+        setRunOutput((prevOut) => [
+          ...prevOut,
+          { stream: "stderr", data: `\n[auto-fix] ${ev.reason}\n` },
+        ]);
+        return;
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   const viewLog = async (entry: RunLogEntry) => {
     try {
       const content = (await window.flowmind.readRunLog(entry.filePath)) as string;
@@ -366,14 +471,21 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     setSelectedLogPath(null);
     setRunStatus("running");
     setParamFormOpen(false);
+    // Reset auto-fix state at the start of each user-initiated run.
+    setAutoFixState({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null });
     try {
       const params = paramsOverride ?? paramDraft;
       const result = (await window.flowmind.runAutomation(
         a.filePath,
         a.format as "python" | "nodejs",
-        params
+        params,
+        flowId
       )) as { runId: string };
       setActiveRun({ runId: result.runId, format: a.format as AutomationFormat, kind: "run" });
+      // Remember the params so subsequent auto-fix retries (triggered by main)
+      // can be reflected back here without the user re-entering values. Main
+      // owns the retry; this is just for UI traceability.
+      setLastRunParams(params);
     } catch (err) {
       setRunStatus("error");
       setRunError(err instanceof Error ? err.message : String(err));
@@ -1041,35 +1153,112 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                     >
                       <span>
                         <strong>
-                          {runStatus === "running" && "● Running..."}
-                          {runStatus === "installing" && "● Installing packages..."}
-                          {runStatus === "completed" && (runExitCode === 0
-                            ? (activeRun?.kind === "install" ? "✓ Install complete" : "✓ Completed")
-                            : "✗ Exited")}
-                          {runStatus === "killed" && "⊗ Killed"}
-                          {runStatus === "timeout" && "⊘ Timed out"}
-                          {runStatus === "error" && "⚠ Failed to start"}
+                          {/* Auto-fix phase overrides the plain run status so
+                              the user sees "Diagnosing..." instead of the
+                              misleading "✗ Exited" between retries. */}
+                          {autoFixState.phase === "diagnosing" && (
+                            <>● Auto-fixing (attempt {autoFixState.attempt}/{autoFixState.maxRetries + 1})…</>
+                          )}
+                          {autoFixState.phase === "retrying" && runStatus === "running" && (
+                            <>● Running retry {autoFixState.attempt}/{autoFixState.maxRetries + 1}…</>
+                          )}
+                          {autoFixState.phase === "exhausted" && (
+                            <>⚠ Auto-fix exhausted</>
+                          )}
+                          {autoFixState.phase === "disabled" && runStatus !== "running" && (
+                            <>✗ Exited (auto-fix disabled)</>
+                          )}
+                          {/* Fall through to the plain statuses when no
+                              auto-fix override is active. */}
+                          {(autoFixState.phase === "idle" ||
+                            (autoFixState.phase === "retrying" && runStatus !== "running") ||
+                            (autoFixState.phase === "disabled" && runStatus === "running")) && (
+                            <>
+                              {runStatus === "running" && "● Running..."}
+                              {runStatus === "installing" && "● Installing packages..."}
+                              {runStatus === "completed" && (runExitCode === 0
+                                ? (activeRun?.kind === "install" ? "✓ Install complete" : "✓ Completed")
+                                : "✗ Exited")}
+                              {runStatus === "killed" && "⊗ Killed"}
+                              {runStatus === "timeout" && "⊘ Timed out"}
+                              {runStatus === "error" && "⚠ Failed to start"}
+                            </>
+                          )}
                         </strong>
-                        {runExitCode !== null && runStatus !== "running" && (
+                        {runExitCode !== null && runStatus !== "running" && autoFixState.phase !== "diagnosing" && (
                           <span style={{ color: "var(--text-muted)", marginLeft: 8 }}>
                             exit code {runExitCode}
                           </span>
                         )}
                       </span>
-                      <button
-                        className="btn btn-secondary"
-                        style={{ padding: "2px 10px", fontSize: 12 }}
-                        onClick={() => {
-                          setRunStatus("idle");
-                          setRunOutput([]);
-                          setRunExitCode(null);
-                          setRunError(null);
-                          setRunMissingInterpreter(null);
-                        }}
-                        disabled={runStatus === "running"}
-                      >
-                        Clear
-                      </button>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {/* Stop auto-fixing — visible during diagnosis or
+                            while a retry is running, disabled afterwards. */}
+                        {(autoFixState.phase === "diagnosing" || autoFixState.phase === "retrying") && activeRun && (
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: "2px 10px", fontSize: 12 }}
+                            onClick={async () => {
+                              if (!activeRun) return;
+                              try {
+                                await window.flowmind.disableAutoFix(activeRun.runId);
+                                setAutoFixState((p) => ({ ...p, phase: "disabled" }));
+                              } catch (err) {
+                                console.error("disableAutoFix failed:", err);
+                              }
+                            }}
+                            title="Stop auto-fixing this chain. The current run finishes, but no further patches are tried."
+                          >
+                            Stop auto-fix
+                          </button>
+                        )}
+                        {/* Promote patch — appears after a retry succeeded
+                            (exit 0) while the active script was a patch. */}
+                        {autoFixState.patchPath &&
+                          runStatus === "completed" &&
+                          runExitCode === 0 &&
+                          autoFixState.phase === "retrying" && (
+                            <button
+                              className="btn btn-primary"
+                              style={{ padding: "2px 10px", fontSize: 12 }}
+                              onClick={async () => {
+                                if (!autoFixState.patchPath) return;
+                                const ok = confirm(
+                                  "Promote this patched script to the primary file?\n\n" +
+                                    "The original script will be overwritten with the patched contents. The patch file will be deleted."
+                                );
+                                if (!ok) return;
+                                try {
+                                  await window.flowmind.promotePatch(autoFixState.patchPath);
+                                  if (flow?.frontmatter.name) {
+                                    await loadAutomations(flow.frontmatter.name);
+                                  }
+                                  setAutoFixState((p) => ({ ...p, patchPath: null }));
+                                } catch (err) {
+                                  alert(`Promote failed: ${err instanceof Error ? err.message : err}`);
+                                }
+                              }}
+                              title="Overwrite the primary script with the working patch."
+                            >
+                              Promote patch
+                            </button>
+                          )}
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: "2px 10px", fontSize: 12 }}
+                          onClick={() => {
+                            setRunStatus("idle");
+                            setRunOutput([]);
+                            setRunExitCode(null);
+                            setRunError(null);
+                            setRunMissingInterpreter(null);
+                            setAutoFixState({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null });
+                          }}
+                          disabled={runStatus === "running" || autoFixState.phase === "diagnosing"}
+                        >
+                          Clear
+                        </button>
+                      </div>
                     </div>
                     {runError && (
                       <div style={{ padding: 12, color: "var(--red, #e55)", fontSize: 13 }}>
