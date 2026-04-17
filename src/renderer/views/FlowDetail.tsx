@@ -17,6 +17,29 @@ function worthLabel(worth: FlowWorth | undefined): string {
   }
 }
 
+/**
+ * Extract CLI parameter names a script declares — the actual runtime source
+ * of truth for what --flags it will accept. Regex-scans for "--name" token
+ * occurrences in the script content; this catches Python argparse
+ * (add_argument("--subject", ...)) and Node.js patterns that mention the
+ * flag in help text or error messages ("missing --subject").
+ *
+ * Standard operational flags (--help, --version, --yes) are filtered out
+ * so they don't show up as parameter fields.
+ */
+function detectCliParamsFromScript(content: string): string[] {
+  const seen = new Set<string>();
+  const STANDARD = new Set(["help", "version", "yes", "no", "quiet", "verbose", "dry-run"]);
+  const re = /--([a-zA-Z][a-zA-Z0-9_-]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    const name = m[1];
+    if (STANDARD.has(name.toLowerCase())) continue;
+    seen.add(name);
+  }
+  return Array.from(seen).sort();
+}
+
 function paramKindLabel(kind: FlowParameter["kind"]): { label: string; color: string } {
   switch (kind) {
     case "fixed":   return { label: "Fixed",   color: "rgba(148, 163, 184, 0.9)" };
@@ -357,9 +380,46 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     }
   };
 
-  /** Open the parameter entry form (if the flow has params) or run straight. */
+  /**
+   * Compute the combined parameter list for the form: script-detected CLI
+   * args are the source of truth for names, augmented with
+   * description/observed_values from flow.parameters where names match.
+   * A name matches case-insensitively and with dashes/underscores
+   * normalised, so "article-subject" / "articleSubject" / "article_subject"
+   * all align with a flow parameter named "article_subject".
+   */
+  const formParameters = useCallback((): FlowParameter[] => {
+    const format = activeTab;
+    if (format !== "python" && format !== "nodejs") return [];
+    const scriptContent = automationContent[format];
+    if (!scriptContent) return flow?.frontmatter.parameters ?? [];
+
+    const detected = detectCliParamsFromScript(scriptContent);
+    if (detected.length === 0) return flow?.frontmatter.parameters ?? [];
+
+    const canon = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
+    const byCanonName = new Map<string, FlowParameter>();
+    for (const p of flow?.frontmatter.parameters ?? []) {
+      byCanonName.set(canon(p.name), p);
+    }
+
+    return detected.map((name): FlowParameter => {
+      const match = byCanonName.get(canon(name));
+      if (match) {
+        // Use the script's actual casing so the --flag matches at runtime.
+        return { ...match, name };
+      }
+      return {
+        name,
+        description: `Runtime value for --${name} (not in extracted parameters metadata; inferred from script).`,
+        kind: null,
+      };
+    });
+  }, [activeTab, automationContent, flow]);
+
+  /** Open the parameter entry form (if the script/flow has params) or run straight. */
   const startRun = (a: AutomationFile) => {
-    const params = flow?.frontmatter.parameters ?? [];
+    const params = formParameters();
     if (params.length > 0) {
       // Seed draft with existing values (so re-running keeps last entry) or
       // the first observed_value as a suggestion.
@@ -865,8 +925,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                   <button className="btn btn-danger" onClick={() => deleteAutomation(a)}>Delete</button>
                 </div>
 
-                {/* Parameter entry form — appears after clicking Run when the flow has parameters. Collects values upfront so the script runs non-interactively. */}
-                {paramFormOpen && (flow?.frontmatter.parameters?.length ?? 0) > 0 && (
+                {/* Parameter entry form — appears after clicking Run when the script declares CLI args (detected directly from the script) or the flow has parameters metadata. Collects values upfront so the script runs non-interactively. */}
+                {paramFormOpen && formParameters().length > 0 && (
                   <div
                     style={{
                       marginBottom: 12,
@@ -883,7 +943,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       Fill in the values. The script will run with each parameter passed as a CLI flag (e.g. <code>--subject Octopus</code>) and as a FLOWMIND_PARAM_* env var.
                     </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                      {flow!.frontmatter.parameters!.map((param) => (
+                      {formParameters().map((param) => (
                         <div key={param.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                           <label style={{ fontSize: 12, fontWeight: 500 }}>
                             <code>--{param.name}</code>
@@ -942,7 +1002,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         onClick={() => runAutomation(a, paramDraft)}
                         disabled={
                           !!activeRun ||
-                          !(flow!.frontmatter.parameters!.every(
+                          !(formParameters().every(
                             (p) => (paramDraft[p.name] ?? "").trim().length > 0
                           ))
                         }

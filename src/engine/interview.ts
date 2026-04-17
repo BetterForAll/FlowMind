@@ -130,6 +130,11 @@ DEPENDENCY ORDER — use the LIGHTEST tool that solves the goal:
 PARAMETERS:
 If a "## Parameters" section is provided below, each listed parameter is a variable the user will supply at runtime. The host (FlowMind) will pass every parameter value to the script BOTH as a CLI flag (\`--<name> <value>\`) AND as an environment variable (\`FLOWMIND_PARAM_<NAME_UPPER>\`). Your script MUST read values from one of these channels — DO NOT use input() / prompt() / readline to ask the user for parameter values interactively. The form-based UI collects values before the script runs; interactive prompts break that flow.
 
+CRITICAL — PARAMETER NAMES ARE EXACT:
+- Use the EXACT names from the "## Parameters" section. Do NOT rename: if the section says \`--subject\`, your script must accept \`--subject\`, NOT \`--articleSubject\`, NOT \`--article-subject\`, NOT \`--topic\`. The form UI will build inputs keyed on these names and pass them verbatim to the script's argv.
+- Do NOT invent additional flags beyond the listed parameters. If the flow needs something not listed, treat it as a fixed value in the script.
+- If the "## Parameters" section is absent entirely, the flow has no runtime parameters — do not fabricate any.
+
 - For Python: use argparse at the top of the script. Declare one argument per parameter with the exact name listed. Treat every parameter as REQUIRED (required=True). Example:
   \`\`\`python
   import argparse
