@@ -182,8 +182,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    *  + vision tools enabled). Cleared after launch or dismissal. */
   const [pendingAgentLevel, setPendingAgentLevel] = useState<1 | 2>(1);
   /** User toggle: pause and ask before every destructive Level 2 tool
-   *  call. Visible only when Level 2 is engaged. */
-  const [approveEachStep, setApproveEachStep] = useState(false);
+   *  call. Visible only when Level 2 is engaged. Defaulted to TRUE —
+   *  Level 2 drives real mouse/keyboard on the live desktop, and the
+   *  user has only confirmed they trust the FLOW, not any specific
+   *  step the agent will take. They can tick this off if they want
+   *  full speed once they've watched a few runs go cleanly. (Will be
+   *  replaced by per-flow trust graduation in a follow-up.) */
+  const [approveEachStep, setApproveEachStep] = useState(true);
   /** Cached desktop-helper readiness probe. null = unknown until first
    *  click; refreshed on demand. */
   const [desktopReady, setDesktopReady] = useState<
