@@ -283,7 +283,14 @@ export class AutomationRunner extends EventEmitter {
     format: "python" | "nodejs",
     packages: string[],
     cwd: string,
-    timeoutMs: number = DEFAULT_TIMEOUT_MS
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    /**
+     * Optional extra arguments spliced after the subcommand. Used for
+     * `--user` on pip installs against a system Python we can't write
+     * to without admin rights. Empty by default — ordinary in-project
+     * installs don't need it.
+     */
+    extraArgs: string[] = []
   ): string {
     if (packages.length === 0) {
       throw new Error("installDeps called with empty package list");
@@ -297,7 +304,7 @@ export class AutomationRunner extends EventEmitter {
       throw new Error(`Refusing to install outside automations directory: ${cwd}`);
     }
 
-    const { bin, args } = pickInstallCommand(format, packages);
+    const { bin, args } = pickInstallCommand(format, packages, extraArgs);
     const child = spawn(bin, args, {
       cwd: resolvedCwd,
       env: process.env,
@@ -457,17 +464,24 @@ function pickCommand(format: "python" | "nodejs"): { bin: string; args: string[]
  */
 function pickInstallCommand(
   format: "python" | "nodejs",
-  packages: string[]
+  packages: string[],
+  extraArgs: string[] = []
 ): { bin: string; args: string[] } {
   if (format === "python") {
     // Use `python -m pip install` rather than calling `pip` directly — this
     // guarantees we install into the same interpreter we'll run the script
     // with. A machine with `pip3` pointing at a different Python than
     // `python3` (not uncommon on macOS) would otherwise break.
+    //
+    // `extraArgs` is where callers can inject `--user` for a system
+    // Python install we can't write to without admin. Placing them
+    // BEFORE the packages so `--user` applies to the whole install set.
     const bin = process.platform === "win32" ? "python" : "python3";
-    return { bin, args: ["-m", "pip", "install", ...packages] };
+    return { bin, args: ["-m", "pip", "install", ...extraArgs, ...packages] };
   }
   // npm install <packages> — goes to the cwd's node_modules, which for us
   // is ~/flowtracker/automations. So the second Run uses the same modules.
-  return { bin: "npm", args: ["install", ...packages] };
+  // extraArgs also applies here in case a future caller needs, e.g.,
+  // --no-save or --prefer-offline.
+  return { bin: "npm", args: ["install", ...extraArgs, ...packages] };
 }

@@ -646,7 +646,19 @@ function setupIPC(): void {
     const os = await import("node:os");
     const cwd = pathMod.join(os.homedir(), "flowtracker", "automations");
     await (await import("node:fs/promises")).mkdir(cwd, { recursive: true });
-    return { runId: automationRunner.installDeps("python", REQUIRED_DESKTOP_PACKAGES, cwd) };
+    // `--user` so desktop deps land in the user's site-packages rather
+    // than the system Python's global. Without it, system-Python installs
+    // (C:\\Python312\\ on Windows) fail with Permission denied because
+    // the FlowMind process isn't elevated.
+    return {
+      runId: automationRunner.installDeps(
+        "python",
+        REQUIRED_DESKTOP_PACKAGES,
+        cwd,
+        undefined,
+        ["--user"]
+      ),
+    };
   });
 
   ipcMain.handle("automations:kill", async (_e, runId: string) => {
