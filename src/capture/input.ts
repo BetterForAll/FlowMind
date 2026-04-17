@@ -2,17 +2,6 @@ import { uIOhook } from "uiohook-napi";
 import { EventEmitter } from "node:events";
 import type { CaptureEvent } from "../types";
 
-// Keycodes worth tracking — not every character, just meaningful actions
-// Using raw keycodes since UiohookKey enum may not cover all
-const MEANINGFUL_KEYCODES = new Set([
-  28,   // Enter
-  15,   // Tab
-  1,    // Escape
-  14,   // Backspace
-  3667, // Delete
-  59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88, // F1-F12
-]);
-
 export class InputCapture extends EventEmitter {
   private running = false;
 
@@ -30,9 +19,11 @@ export class InputCapture extends EventEmitter {
     });
 
     uIOhook.on("keydown", (e) => {
-      // Track meaningful keys, or any key with Ctrl/Alt/Meta modifier
-      const hasModifier = e.ctrlKey || e.altKey || e.metaKey;
-      if (!MEANINGFUL_KEYCODES.has(e.keycode) && !hasModifier) return;
+      // Capture EVERY keypress so phase 1 can describe typed content.
+      // If `keychar` is a printable character, include it so downstream
+      // aggregation can reconstruct what the user actually typed.
+      const keychar = (e as unknown as { keychar?: number }).keychar ?? 0;
+      const char = keychar >= 32 && keychar !== 127 ? String.fromCharCode(keychar) : undefined;
 
       const event: CaptureEvent = {
         ts: new Date().toISOString(),
@@ -43,6 +34,7 @@ export class InputCapture extends EventEmitter {
           alt: e.altKey || false,
           meta: e.metaKey || false,
           shift: e.shiftKey || false,
+          ...(char !== undefined ? { char } : {}),
         },
       };
       this.emit("event", event);

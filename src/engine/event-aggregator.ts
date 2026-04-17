@@ -25,7 +25,12 @@ interface AppSegment {
   clicks: number;
   scrolls: number;
   shortcuts: Map<string, number>;
+  typedText: string;
 }
+
+// Truncate typed text per segment at this many chars to keep prompts sane.
+// Real text input for a workflow is usually well under this.
+const MAX_TYPED_PER_SEGMENT = 500;
 
 /**
  * Aggregate raw capture events into human-readable summaries.
@@ -55,6 +60,7 @@ export function aggregateEvents(events: CaptureEvent[]): string {
         clicks: 0,
         scrolls: 0,
         shortcuts: new Map(),
+        typedText: "",
       };
       continue;
     }
@@ -70,6 +76,7 @@ export function aggregateEvents(events: CaptureEvent[]): string {
         clicks: 0,
         scrolls: 0,
         shortcuts: new Map(),
+        typedText: "",
       };
     }
 
@@ -78,12 +85,13 @@ export function aggregateEvents(events: CaptureEvent[]): string {
     switch (event.type) {
       case "keypress": {
         current.keypresses++;
-        // Detect shortcuts
         const keycode = event.data.keycode as number;
         const ctrl = event.data.ctrl as boolean;
         const alt = event.data.alt as boolean;
         const meta = event.data.meta as boolean;
+        const char = event.data.char as string | undefined;
 
+        // Keys with a modifier are shortcuts, not text input
         if (ctrl || alt || meta) {
           const prefix = [
             ctrl ? "ctrl" : "",
@@ -93,6 +101,24 @@ export function aggregateEvents(events: CaptureEvent[]): string {
           const combo = `${prefix}+${keycode}`;
           const name = SHORTCUT_NAMES[combo] ?? combo;
           current.shortcuts.set(name, (current.shortcuts.get(name) ?? 0) + 1);
+          break;
+        }
+
+        // Plain (no-modifier) keys: accumulate typed text
+        if (current.typedText.length < MAX_TYPED_PER_SEGMENT) {
+          if (keycode === 14) {
+            // Backspace — remove last char
+            current.typedText = current.typedText.slice(0, -1);
+          } else if (keycode === 28) {
+            // Enter — mark as newline
+            current.typedText += "⏎";
+          } else if (keycode === 15) {
+            // Tab
+            current.typedText += "\t";
+          } else if (char) {
+            current.typedText += char;
+          }
+          // Unmapped special keys (Escape, F-keys, arrows, Delete) are counted in keypresses but not added to typedText
         }
         break;
       }
@@ -132,6 +158,10 @@ function mergeConsecutiveSegments(segments: AppSegment[]): AppSegment[] {
       for (const [key, count] of curr.shortcuts) {
         prev.shortcuts.set(key, (prev.shortcuts.get(key) ?? 0) + count);
       }
+      const remaining = MAX_TYPED_PER_SEGMENT - prev.typedText.length;
+      if (remaining > 0 && curr.typedText.length > 0) {
+        prev.typedText += curr.typedText.slice(0, remaining);
+      }
     } else {
       result.push(curr);
     }
@@ -160,8 +190,17 @@ function formatSegment(seg: AppSegment): string {
   if (shortcutStr) parts.push(shortcutStr);
 
   const activity = parts.length > 0 ? parts.join(", ") : "idle";
+  const base = `${timeRange}: [${seg.app}] "${title}" — ${activity}`;
 
-  return `${timeRange}: [${seg.app}] "${title}" — ${activity}`;
+  // If the user typed anything, append it on a continuation line so the model
+  // can see exactly what text went into this window.
+  if (seg.typedText.length > 0) {
+    const typed = seg.typedText.length >= MAX_TYPED_PER_SEGMENT
+      ? seg.typedText + " [...truncated]"
+      : seg.typedText;
+    return `${base}\n    typed: ${JSON.stringify(typed)}`;
+  }
+  return base;
 }
 
 function formatTime(isoString: string): string {
