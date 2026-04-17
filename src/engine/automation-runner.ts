@@ -326,6 +326,50 @@ export class AutomationRunner extends EventEmitter {
     return true;
   }
 
+  /**
+   * Write a line to a running process's stdin. The newline is appended so
+   * Python's input() / Node's readline receive the complete input event.
+   * Also echoes the written text to the runner's event stream so the UI's
+   * output panel shows what the user typed (stdout shade, so it's clear the
+   * string came from the user, not from the script).
+   *
+   * Returns true if the input was queued, false if the run is unknown or
+   * its stdin has already been closed.
+   */
+  sendInput(runId: string, text: string): boolean {
+    const active = this.runs.get(runId);
+    if (!active) return false;
+    const stdin = active.child.stdin;
+    if (!stdin || stdin.destroyed) return false;
+    try {
+      stdin.write(`${text}\n`);
+    } catch {
+      return false;
+    }
+    // Mirror to log + UI so the transcript is readable ("> input text").
+    const echo = `> ${text}\n`;
+    try { active.logStream.write(`[stdin] ${echo}`); } catch { /* no-op for install runs */ }
+    this.emit("event", { runId, type: "output", stream: "stdout", data: echo } satisfies RunEvent);
+    return true;
+  }
+
+  /**
+   * Close a running process's stdin (Ctrl-D equivalent). Useful when a
+   * script reads until EOF (sys.stdin.read()).
+   */
+  closeStdin(runId: string): boolean {
+    const active = this.runs.get(runId);
+    if (!active) return false;
+    const stdin = active.child.stdin;
+    if (!stdin || stdin.destroyed) return false;
+    try {
+      stdin.end();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private emitEvent(event: RunEvent): void {
     this.emit("event", event);
   }
@@ -333,12 +377,17 @@ export class AutomationRunner extends EventEmitter {
 
 function pickCommand(format: "python" | "nodejs"): { bin: string; args: string[] } {
   if (format === "python") {
-    // On Windows, `python` is the conventional name via the py launcher or PATH.
-    // On macOS/Linux, `python3` is the modern default — many systems lack a
-    // `python` alias. We'll try `python3` first on non-Windows; Windows uses
-    // `python` which is what the installer from python.org provides.
-    if (process.platform === "win32") return { bin: "python", args: [] };
-    return { bin: "python3", args: [] };
+    // -u: force unbuffered stdout/stderr. Without this, print() output can be
+    // held in Python's buffers and only flushed at exit, which makes the live
+    // output panel look broken and can hide input() prompts. input() itself
+    // flushes its prompt, but the prevailing advice on piped stdin/stdout is
+    // to always run with -u.
+    //
+    // On Windows, `python` is the conventional name via the py launcher or
+    // PATH. On macOS/Linux, `python3` is the modern default — many systems
+    // lack a `python` alias.
+    if (process.platform === "win32") return { bin: "python", args: ["-u"] };
+    return { bin: "python3", args: ["-u"] };
   }
   return { bin: "node", args: [] };
 }

@@ -55,6 +55,10 @@ const api = {
     ipcRenderer.invoke("automations:run", filePath, format),
   killAutomation: (runId: string) =>
     ipcRenderer.invoke("automations:kill", runId),
+  sendInputToAutomation: (runId: string, text: string) =>
+    ipcRenderer.invoke("automations:sendInput", runId, text),
+  closeAutomationStdin: (runId: string) =>
+    ipcRenderer.invoke("automations:closeStdin", runId),
   listRunLogs: (flowName: string, format: string) =>
     ipcRenderer.invoke("automations:listRunLogs", flowName, format),
   readRunLog: (filePath: string) =>

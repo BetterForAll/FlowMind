@@ -395,6 +395,14 @@ function setupIPC(): void {
     return { killed: automationRunner.kill(runId) };
   });
 
+  ipcMain.handle("automations:sendInput", async (_e, runId: string, text: string) => {
+    return { sent: automationRunner.sendInput(runId, text) };
+  });
+
+  ipcMain.handle("automations:closeStdin", async (_e, runId: string) => {
+    return { closed: automationRunner.closeStdin(runId) };
+  });
+
   ipcMain.handle("automations:listRunLogs", async (_e, flowName: string, format: string) => {
     return flowStore.listRunLogs(flowName, format);
   });

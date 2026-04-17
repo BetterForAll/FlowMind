@@ -74,6 +74,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [selectedLogPath, setSelectedLogPath] = useState<string | null>(null);
   // External (non-stdlib / non-builtin) deps detected in each format's script.
   const [externalDeps, setExternalDeps] = useState<Record<string, string[]>>({});
+  const [stdinDraft, setStdinDraft] = useState("");
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -330,6 +331,26 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       await window.flowmind.killAutomation(activeRun.runId);
     } catch (err) {
       console.error("Kill failed:", err);
+    }
+  };
+
+  const sendStdin = async () => {
+    if (!activeRun || activeRun.kind !== "run") return;
+    const text = stdinDraft;
+    setStdinDraft("");
+    try {
+      await window.flowmind.sendInputToAutomation(activeRun.runId, text);
+    } catch (err) {
+      console.error("Send input failed:", err);
+    }
+  };
+
+  const closeStdin = async () => {
+    if (!activeRun || activeRun.kind !== "run") return;
+    try {
+      await window.flowmind.closeAutomationStdin(activeRun.runId);
+    } catch (err) {
+      console.error("Close stdin failed:", err);
     }
   };
 
@@ -841,6 +862,60 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         </span>
                       ))}
                     </pre>
+
+                    {/* Stdin input field — only for live script runs, not installs or finished runs. */}
+                    {runStatus === "running" && activeRun?.kind === "run" && (
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          padding: 8,
+                          borderTop: "1px solid var(--border)",
+                          background: "var(--surface-hover)",
+                        }}
+                      >
+                        <span style={{ color: "var(--text-muted)", fontFamily: "monospace", fontSize: 12, lineHeight: "28px" }}>&gt;</span>
+                        <input
+                          type="text"
+                          value={stdinDraft}
+                          onChange={(e) => setStdinDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              sendStdin();
+                            }
+                          }}
+                          placeholder="Type input for the script and press Enter..."
+                          style={{
+                            flex: 1,
+                            padding: "4px 8px",
+                            background: "var(--bg-code, rgba(0,0,0,0.25))",
+                            border: "1px solid var(--border)",
+                            borderRadius: 3,
+                            color: "var(--text)",
+                            fontFamily: "monospace",
+                            fontSize: 12,
+                          }}
+                          autoFocus
+                        />
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                          onClick={sendStdin}
+                          title="Send line to script stdin"
+                        >
+                          Send
+                        </button>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                          onClick={closeStdin}
+                          title="Close stdin (Ctrl-D equivalent) — for scripts that read until EOF"
+                        >
+                          EOF
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
