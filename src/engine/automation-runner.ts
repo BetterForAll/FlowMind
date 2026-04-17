@@ -94,8 +94,15 @@ export class AutomationRunner extends EventEmitter {
      * (and any diff tool) can tell an auto-fix retry apart from a normal
      * run. `attempt` is 1 for the original run, 2+ for auto-fix retries.
      * `previousError` is a short summary of why the prior run failed.
+     * `diagnosis` is the ScriptDoctor's one-paragraph explanation of what
+     * it changed and why — persisted so the user can read it later.
      */
-    retryMeta?: { attempt: number; previousError?: string; patchFromPath?: string }
+    retryMeta?: {
+      attempt: number;
+      previousError?: string;
+      patchFromPath?: string;
+      diagnosis?: string;
+    }
   ): string {
     // Security: only run files that live inside ~/flowtracker/automations.
     const resolved = path.resolve(filePath);
@@ -159,6 +166,9 @@ export class AutomationRunner extends EventEmitter {
                 : []),
               ...(retryMeta.patchFromPath
                 ? [`# patched_from: ${retryMeta.patchFromPath}`]
+                : []),
+              ...(retryMeta.diagnosis
+                ? [`# diagnosis: ${retryMeta.diagnosis.replace(/\n/g, " ").slice(0, 1000)}`]
                 : []),
             ]
           : []),

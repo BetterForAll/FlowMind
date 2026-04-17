@@ -114,13 +114,18 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [paramFormOpen, setParamFormOpen] = useState(false);
   // Auto-fix progress across a chain of retries. `phase` drives the visible
   // status; `attempt` is 1-indexed (1 = original run, 2+ = auto-fix retries).
+  // `diagnosis` is the doctor's most recent explanation; `previousError` is
+  // the short one-liner extracted from the prior run's stderr — rendered in
+  // the panel so the user can see exactly what the doctor was reacting to.
   const [autoFixState, setAutoFixState] = useState<{
     phase: "idle" | "diagnosing" | "retrying" | "exhausted" | "disabled";
     attempt: number;
     maxRetries: number;
     patchPath: string | null;
     reason: string | null;
-  }>({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null });
+    diagnosis?: string | null;
+    previousError?: string | null;
+  }>({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null, diagnosis: null, previousError: null });
   // Params used on the current run chain — kept so the UI can show what
   // values the latest retry was invoked with (values are held in main
   // between retries; this mirror is purely informational).
@@ -293,6 +298,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       maxRetries: number;
       patchPath: string;
       previousError: string;
+      diagnosis: string;
     }
     interface AutoFixFailed {
       type: "auto_fix_failed";
@@ -337,6 +343,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           maxRetries: ev.maxRetries,
           patchPath: ev.patchPath,
           reason: null,
+          diagnosis: ev.diagnosis,
+          previousError: ev.previousError,
         });
         // Switch the active run to the new runId. Keep the prior output so
         // the user can scroll up and see what the original run did before
@@ -352,7 +360,10 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           ...prev,
           {
             stream: "stdout",
-            data: `\n[auto-fix] Patched script ready at ${ev.patchPath}\n[auto-fix] Retrying (attempt ${ev.attempt}/${ev.maxRetries + 1})...\n`,
+            data:
+              `\n[auto-fix] Diagnosis: ${ev.diagnosis}\n` +
+              `[auto-fix] Patched script saved to ${ev.patchPath}\n` +
+              `[auto-fix] Retrying (attempt ${ev.attempt}/${ev.maxRetries + 1})...\n`,
           },
         ]);
         return;
@@ -495,7 +506,15 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     setRunStatus("running");
     setParamFormOpen(false);
     // Reset auto-fix state at the start of each user-initiated run.
-    setAutoFixState({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null });
+    setAutoFixState({
+      phase: "idle",
+      attempt: 1,
+      maxRetries: 0,
+      patchPath: null,
+      reason: null,
+      diagnosis: null,
+      previousError: null,
+    });
     try {
       const params = paramsOverride ?? paramDraft;
       const result = (await window.flowmind.runAutomation(
@@ -1275,7 +1294,15 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                             setRunExitCode(null);
                             setRunError(null);
                             setRunMissingInterpreter(null);
-                            setAutoFixState({ phase: "idle", attempt: 1, maxRetries: 0, patchPath: null, reason: null });
+                            setAutoFixState({
+                              phase: "idle",
+                              attempt: 1,
+                              maxRetries: 0,
+                              patchPath: null,
+                              reason: null,
+                              diagnosis: null,
+                              previousError: null,
+                            });
                           }}
                           disabled={runStatus === "running" || autoFixState.phase === "diagnosing"}
                         >
@@ -1286,6 +1313,44 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                     {runError && (
                       <div style={{ padding: 12, color: "var(--red, #e55)", fontSize: 13 }}>
                         {runError}
+                      </div>
+                    )}
+                    {/* Auto-fix diagnosis card — shown after the doctor has
+                        returned a patch. Renders even after the retry
+                        completes so the user can still read what was
+                        changed. Clears on the next user-initiated run. */}
+                    {autoFixState.diagnosis && (
+                      <div
+                        style={{
+                          padding: 12,
+                          background: "rgba(129, 140, 248, 0.08)",
+                          borderTop: "1px solid var(--border)",
+                          borderBottom: "1px solid var(--border)",
+                          fontSize: 13,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4,
+                        }}
+                      >
+                        <div>
+                          <strong>Auto-fix diagnosis</strong>{" "}
+                          <span style={{ color: "var(--text-muted)" }}>
+                            (attempt {autoFixState.attempt}/{autoFixState.maxRetries + 1})
+                          </span>
+                        </div>
+                        {autoFixState.previousError && (
+                          <div style={{ color: "var(--text-muted)" }}>
+                            <strong>Prior error:</strong> {autoFixState.previousError}
+                          </div>
+                        )}
+                        <div>
+                          <strong>Fix:</strong> {autoFixState.diagnosis}
+                        </div>
+                        {autoFixState.patchPath && (
+                          <div style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                            Patch: <code>{autoFixState.patchPath}</code>
+                          </div>
+                        )}
                       </div>
                     )}
                     {runMissingInterpreter && (

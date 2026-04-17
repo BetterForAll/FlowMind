@@ -37,6 +37,9 @@ export type AutoFixEvent =
       maxRetries: number;
       patchPath: string;
       previousError: string;
+      /** Doctor's explanation of what it changed and why, displayed to the
+       *  user so they understand the patch without opening a diff tool. */
+      diagnosis: string;
     }
   | { type: "auto_fix_failed"; runId: string; reason: string; attempt: number }
   | {
@@ -232,6 +235,7 @@ export class AutoFixOrchestrator extends EventEmitter {
 
     const model = await this.modelResolver();
     let patched: string;
+    let diagnosis = "(no diagnosis available)";
     try {
       const result = await this.doctor.fix(
         {
@@ -247,6 +251,7 @@ export class AutoFixOrchestrator extends EventEmitter {
         model
       );
       patched = result.patched;
+      if (result.diagnosis) diagnosis = result.diagnosis;
     } catch (err) {
       this.emit("event", {
         type: "auto_fix_failed",
@@ -304,6 +309,7 @@ export class AutoFixOrchestrator extends EventEmitter {
           attempt: tracked.attempt + 1,
           previousError,
           patchFromPath: tracked.filePath,
+          diagnosis,
         }
       );
     } catch (err) {
@@ -338,6 +344,7 @@ export class AutoFixOrchestrator extends EventEmitter {
       maxRetries,
       patchPath,
       previousError,
+      diagnosis,
     } satisfies AutoFixEvent);
 
     // Old run is now fully handled.
