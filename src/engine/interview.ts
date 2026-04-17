@@ -127,12 +127,35 @@ DEPENDENCY ORDER — use the LIGHTEST tool that solves the goal:
    When you DO reach for browser automation, prefer Playwright over Selenium — it's faster, bundles its own browser via \`playwright install\`, and is much less flaky. Use Selenium only when Playwright genuinely can't do the job.
    Any time you use UI automation, state clearly in the opening docstring WHY no lighter option exists.
 
+PARAMETERS:
+If a "## Parameters" section is provided below, each listed parameter is a variable the user will supply at runtime. The host (FlowMind) will pass every parameter value to the script BOTH as a CLI flag (\`--<name> <value>\`) AND as an environment variable (\`FLOWMIND_PARAM_<NAME_UPPER>\`). Your script MUST read values from one of these channels — DO NOT use input() / prompt() / readline to ask the user for parameter values interactively. The form-based UI collects values before the script runs; interactive prompts break that flow.
+
+- For Python: use argparse at the top of the script. Declare one argument per parameter with the exact name listed. Treat every parameter as REQUIRED (required=True). Example:
+  \`\`\`python
+  import argparse
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--subject", required=True, help="...")
+  parser.add_argument("--folder", required=True, help="...")
+  args = parser.parse_args()
+  # use args.subject, args.folder
+  \`\`\`
+- For Node.js: parse process.argv or use a tiny manual parser. Same naming convention. Example:
+  \`\`\`javascript
+  const args = Object.fromEntries(
+    process.argv.slice(2).reduce((acc, v, i, a) => i % 2 === 0 ? [...acc, [v.replace(/^--/, ""), a[i + 1]]] : acc, [])
+  );
+  const { subject, folder } = args;
+  if (!subject || !folder) { console.error("missing --subject or --folder"); process.exit(1); }
+  \`\`\`
+- If no parameters are listed, the script has no runtime inputs and should run end-to-end without prompting.
+
 OTHER RULES:
 - The automation must achieve the flow's outcome. ALL steps' collective goal must be reached — but individual steps may be collapsed or replaced with a lighter equivalent.
 - Include error handling for network calls and filesystem operations.
 - Add comments explaining any non-obvious decision logic.
-- Never hardcode sensitive values — read from environment variables or prompt the user at first run.
-- Mark steps that need human approval with clear interactive prompts (e.g. input() in Python).
+- Never hardcode SENSITIVE values (API keys, tokens) — read those from environment variables (os.getenv / process.env) and fail fast with a clear message if they're absent.
+- Parameter values are NOT sensitive; they come from the form-based runner and go through CLI flags / FLOWMIND_PARAM_* env vars as described above. Do NOT prompt the user for them.
+- If a step genuinely needs human approval MID-SCRIPT (e.g. a destructive action that should be confirmed even when all parameters are filled), that's the one acceptable use of input() — and it should be gated behind a --yes flag or explicit env var so the form-based flow can bypass it.
 
 Respond with ONLY the requested code/document, no explanations.`;
 
@@ -351,6 +374,25 @@ Rules:
       throw new Error(`Unknown format: ${format}. Use: python, nodejs, claude-skill, tutorial`);
     }
 
+    // Parameters block — only for script formats. For claude-skill / tutorial
+    // the user fills parameters in prose, so the extra instruction would be
+    // noise.
+    const parametersSection = (() => {
+      const params = flow.frontmatter.parameters ?? [];
+      if (params.length === 0 || (format !== "python" && format !== "nodejs")) return "";
+      const lines: string[] = ["", "## Parameters", ""];
+      lines.push("The script MUST accept these parameters from the runtime (CLI flags + FLOWMIND_PARAM_* env vars). Do NOT prompt the user for them via input() / readline.");
+      lines.push("");
+      for (const p of params) {
+        const examples = (p.observed_values ?? []).slice(0, 3).join(", ");
+        lines.push(
+          `- \`--${p.name}\` — ${p.description}` +
+            (examples ? ` Examples: ${examples}.` : "")
+        );
+      }
+      return lines.join("\n");
+    })();
+
     const response = await this.genai.models.generateContent({
       model: await this.getAutomationModel(),
       contents: [
@@ -360,6 +402,7 @@ Rules:
             { text: AUTOMATION_PROMPT },
             { text: `\n\n## Format\n${fmt.instruction}` },
             { text: `\n\n## Flow Document\n${flow.body}` },
+            ...(parametersSection ? [{ text: parametersSection }] : []),
           ],
         },
       ],
