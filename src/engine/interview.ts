@@ -149,12 +149,37 @@ const AUTOMATION_PROMPT = `You are FlowMind, an AI that generates automations fr
 
 Given the complete flow document below, generate the requested output format.
 
-RULES:
-- The automation must faithfully implement ALL steps in the flow
-- Include error handling for external service calls
-- Add comments explaining decision logic
-- Never hardcode sensitive values — use environment variables
-- Mark steps that need human approval with clear prompts
+PRIMARY RULE — AUTOMATE THE GOAL, NOT THE KEYSTROKES.
+
+The observed steps describe HOW the user did something manually (open browser, click link, Ctrl+S, type filename, press Enter). Your job is to achieve the SAME RESULT using the lightest possible code — not to replay those exact clicks.
+
+Examples:
+- Observed: "user typed google.com, searched, clicked an article, Ctrl+S, typed filename, saved to Documents."
+  Wrong: selenium drives a browser, clicks search, pyautogui types into the Save-As dialog.
+  Right: urllib.request fetches the article URL, writes bytes to the target file. No browser, no clicks.
+- Observed: "user opened calendar.google.com, clicked New Event, filled title, saved."
+  Wrong: selenium clicks through the Google Calendar UI.
+  Right: Google Calendar API call, authenticated from env vars.
+- Observed: "user right-clicked a file and used Move to..."
+  Wrong: pyautogui navigates the context menu.
+  Right: shutil.move() or pathlib.Path.rename().
+
+DEPENDENCY ORDER — use the LIGHTEST tool that solves the goal:
+1. Standard library ALWAYS first (pathlib, shutil, urllib.request, smtplib, subprocess, json, re, datetime, os, csv, sqlite3).
+2. A widely-available single-purpose library next (requests for HTTP if cleaner than urllib; a specific API SDK like google-api-python-client for a Google service).
+3. UI automation (playwright, selenium, pyautogui, pyperclip, webdriver-manager) is a LAST RESORT. Only use it when the goal TRULY cannot be done via API, CLI, or filesystem:
+   - A desktop app with no exposed API (Photoshop filter, Figma canvas manipulation via UI)
+   - A web app that requires CAPTCHA-like human interaction
+   - A GUI-only installer or legacy Windows tool
+   When you DO reach for browser automation, prefer Playwright over Selenium — it's faster, bundles its own browser via \`playwright install\`, and is much less flaky. Use Selenium only when Playwright genuinely can't do the job.
+   Any time you use UI automation, state clearly in the opening docstring WHY no lighter option exists.
+
+OTHER RULES:
+- The automation must achieve the flow's outcome. ALL steps' collective goal must be reached — but individual steps may be collapsed or replaced with a lighter equivalent.
+- Include error handling for network calls and filesystem operations.
+- Add comments explaining any non-obvious decision logic.
+- Never hardcode sensitive values — read from environment variables or prompt the user at first run.
+- Mark steps that need human approval with clear interactive prompts (e.g. input() in Python).
 
 Respond with ONLY the requested code/document, no explanations.`;
 
@@ -352,11 +377,11 @@ Rules:
     const formatInstructions: Record<string, { ext: string; instruction: string }> = {
       python: {
         ext: "py",
-        instruction: "Generate a Python script that automates this workflow. Use standard libraries where possible, subprocess for CLI tools, and requests for HTTP calls. Start the script with a module docstring describing what it does.",
+        instruction: "Generate a Python script that automates the GOAL of this workflow. Prefer the standard library (pathlib, shutil, urllib.request, subprocess, smtplib, json, re, csv, sqlite3). Use `requests` only if genuinely cleaner than urllib. Use an API SDK when the workflow targets a service that has one (Google APIs, Slack SDK, etc.). Only reach for browser/desktop automation (playwright, selenium, pyautogui, pyperclip) if the goal truly cannot be achieved any other way — and if you do, prefer Playwright over Selenium. Start with a module docstring explaining what the script does and, if UI automation was necessary, why lighter options don't apply.",
       },
       nodejs: {
         ext: "js",
-        instruction: "Generate a Node.js script that automates this workflow. Use built-in modules and fetch for HTTP calls. Start the script with a top comment block describing what it does.",
+        instruction: "Generate a Node.js script that automates the GOAL of this workflow. Prefer built-in modules (fs, fs/promises, path, child_process, fetch — globally available in modern Node, url, stream, crypto). Use an API SDK when the workflow targets a service with one. Only reach for browser automation (playwright, puppeteer) if the goal truly cannot be achieved any other way — and if you do, prefer Playwright. Start with a top comment block explaining what the script does and, if UI automation was necessary, why lighter options don't apply.",
       },
       "claude-skill": {
         ext: "md",
