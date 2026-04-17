@@ -85,11 +85,13 @@ const api = {
     ipcRenderer.on("capture:stats", listener);
     return () => ipcRenderer.removeListener("capture:stats", listener);
   },
-  onAutomationEvent: (callback: (event: unknown) => void) => {
+  onAutomationEvent: (callback: (event: unknown) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, runEvent: unknown) =>
       callback(runEvent);
     ipcRenderer.on("automations:event", listener);
-    return () => ipcRenderer.removeListener("automations:event", listener);
+    return () => {
+      ipcRenderer.removeListener("automations:event", listener);
+    };
   },
 
   // Audio capture (renderer-side)

@@ -56,6 +56,12 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   const [sources, setSources] = useState<DescriptionDocument[]>([]);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [keyScreenshotsByFile, setKeyScreenshotsByFile] = useState<Record<string, string[]>>({});
+  // Run-automation state — one active run per automation format at a time.
+  const [activeRun, setActiveRun] = useState<{ runId: string; format: AutomationFormat } | null>(null);
+  const [runOutput, setRunOutput] = useState<{ stream: "stdout" | "stderr"; data: string }[]>([]);
+  const [runStatus, setRunStatus] = useState<"idle" | "running" | "completed" | "killed" | "timeout" | "error">("idle");
+  const [runExitCode, setRunExitCode] = useState<number | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
 
   const loadAutomations = useCallback(async (flowName: string) => {
     const list = await window.flowmind.listAutomationsForFlow(flowName) as AutomationFile[];
@@ -117,6 +123,39 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourcesOpen, sources]);
 
+  // Subscribe to automation run events once on mount.
+  useEffect(() => {
+    interface RunEvent {
+      runId: string;
+      type: "output" | "exit";
+      stream?: "stdout" | "stderr";
+      data?: string;
+      code?: number | null;
+      reason?: "completed" | "killed" | "timeout" | "error";
+      error?: string;
+    }
+    const unsubscribe = window.flowmind.onAutomationEvent((raw: unknown) => {
+      const event = raw as RunEvent;
+      // Use a functional setState so we can filter by the current activeRun's id
+      // without needing activeRun as a dep. Stale runs are ignored.
+      setActiveRun((current) => {
+        if (!current || event.runId !== current.runId) return current;
+        if (event.type === "output" && event.data && event.stream) {
+          setRunOutput((prev) => [...prev, { stream: event.stream!, data: event.data! }]);
+          return current;
+        }
+        if (event.type === "exit") {
+          setRunStatus(event.reason ?? "completed");
+          setRunExitCode(event.code ?? null);
+          if (event.error) setRunError(event.error);
+          return null; // run is done
+        }
+        return current;
+      });
+    });
+    return unsubscribe;
+  }, []);
+
   const submitAllAnswers = async () => {
     const unanswered = questions.filter((q) => !q.answered);
     const allFilled = unanswered.every((q) => answers[q.index]?.trim());
@@ -176,6 +215,37 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     const body = automationContent[format];
     if (!body) return;
     await navigator.clipboard.writeText(body);
+  };
+
+  const runAutomation = async (a: AutomationFile) => {
+    if (a.format !== "python" && a.format !== "nodejs") return;
+    const ok = confirm(
+      `Run ${a.filename}?\n\n` +
+        `This will execute the script locally using ${a.format === "python" ? "Python" : "Node.js"}. ` +
+        `Make sure you've reviewed the code — it's LLM-generated and will run with your user permissions.\n\n` +
+        `Runs have a 5-minute hard timeout. You can kill a run at any time.`
+    );
+    if (!ok) return;
+    setRunOutput([]);
+    setRunExitCode(null);
+    setRunError(null);
+    setRunStatus("running");
+    try {
+      const result = (await window.flowmind.runAutomation(a.filePath, a.format as "python" | "nodejs")) as { runId: string };
+      setActiveRun({ runId: result.runId, format: a.format as AutomationFormat });
+    } catch (err) {
+      setRunStatus("error");
+      setRunError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const killAutomation = async () => {
+    if (!activeRun) return;
+    try {
+      await window.flowmind.killAutomation(activeRun.runId);
+    } catch (err) {
+      console.error("Kill failed:", err);
+    }
   };
 
   const deleteAutomation = async (a: AutomationFile) => {
@@ -491,6 +561,22 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                 </div>
 
                 <div className="btn-group" style={{ marginBottom: 12 }}>
+                  {(a.format === "python" || a.format === "nodejs") && (
+                    activeRun && activeRun.format === a.format ? (
+                      <button className="btn btn-danger" onClick={killAutomation}>
+                        Kill Run
+                      </button>
+                    ) : (
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => runAutomation(a)}
+                        disabled={!!activeRun}
+                        title={activeRun ? "Another automation is currently running" : `Execute this ${a.format === "python" ? "Python" : "Node.js"} script`}
+                      >
+                        Run Automation
+                      </button>
+                    )
+                  )}
                   <button className="btn btn-secondary" onClick={() => openAutomation(a)}>Open</button>
                   <button className="btn btn-secondary" onClick={() => revealAutomation(a)}>Reveal in Explorer</button>
                   <button className="btn btn-secondary" onClick={() => copyAutomation(activeTab)}>Copy</button>
@@ -503,6 +589,88 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                   </button>
                   <button className="btn btn-danger" onClick={() => deleteAutomation(a)}>Delete</button>
                 </div>
+
+                {/* Run output panel — appears once a run has started, persists after exit. */}
+                {(runStatus !== "idle" && (activeTab === "python" || activeTab === "nodejs")) && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: "8px 12px",
+                        background: "var(--surface-hover)",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        fontSize: 13,
+                      }}
+                    >
+                      <span>
+                        <strong>
+                          {runStatus === "running" && "● Running..."}
+                          {runStatus === "completed" && (runExitCode === 0 ? "✓ Completed" : "✗ Exited")}
+                          {runStatus === "killed" && "⊗ Killed"}
+                          {runStatus === "timeout" && "⊘ Timed out"}
+                          {runStatus === "error" && "⚠ Failed to start"}
+                        </strong>
+                        {runExitCode !== null && runStatus !== "running" && (
+                          <span style={{ color: "var(--text-muted)", marginLeft: 8 }}>
+                            exit code {runExitCode}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: "2px 10px", fontSize: 12 }}
+                        onClick={() => {
+                          setRunStatus("idle");
+                          setRunOutput([]);
+                          setRunExitCode(null);
+                          setRunError(null);
+                        }}
+                        disabled={runStatus === "running"}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {runError && (
+                      <div style={{ padding: 12, color: "var(--red, #e55)", fontSize: 13 }}>
+                        {runError}
+                      </div>
+                    )}
+                    <pre
+                      style={{
+                        margin: 0,
+                        padding: 12,
+                        background: "var(--bg-code, rgba(0,0,0,0.25))",
+                        fontSize: 12,
+                        maxHeight: 400,
+                        overflow: "auto",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {runOutput.length === 0 && runStatus === "running" && (
+                        <span style={{ color: "var(--text-muted)" }}>Waiting for output...</span>
+                      )}
+                      {runOutput.map((chunk, i) => (
+                        <span
+                          key={i}
+                          style={{
+                            color: chunk.stream === "stderr" ? "var(--red, #e55)" : "inherit",
+                          }}
+                        >
+                          {chunk.data}
+                        </span>
+                      ))}
+                    </pre>
+                  </div>
+                )}
 
                 {generateError && (
                   <div style={{ marginBottom: 12, color: "var(--red, #e55)" }}>
