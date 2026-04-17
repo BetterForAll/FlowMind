@@ -1,141 +1,152 @@
 # Flow Evaluator — Plan
 
-Status: active, about to implement.
+Status: active. Matcher is landed (commits 449b1fa → 91c987a). Classify and
+Gap-close are the remaining scope.
 
-## Goal
+## What the evaluator is, actually
 
-Stop accumulating duplicate flows. When phase 2 detects a flow that matches
-one already on disk, update the existing flow (bump `occurrences`, `last_seen`,
-union `source_windows` and `apps`) instead of writing a new file.
+A single pass that runs AFTER phase-2 detection and BEFORE saving. It has
+three responsibilities. Earlier work mistakenly scoped the evaluator to
+only the first one, hence this rewrite.
 
-This is active issue #1 from the session plan — "Evaluator pass + auto-resolver",
-re-scoped to emphasize cross-session matching (Level 2) as the load-bearing
-capability. Level 1 (within-run dedupe) is a cheap sanity check bolted onto
-the same call.
+### (a) Match  (landed 2026-04-17 — commits 449b1fa..91c987a)
 
-## Design decisions and why
+"Is this newly-detected flow the same workflow as an existing one?" →
+merge evidence (occurrences++, last_seen=now, union source_windows, union
+apps) or save as new. Includes within-run duplicate collapse.
 
-### Separate Gemini call (not inline in the phase-2 prompt)
+Gemini call: yes. Model: inherits detectionModel. Pre-filter: app-overlap.
 
-The phase-2 detection prompt is already dense (classify complete/partial/
-knowledge, produce step markdown, cite `source_windows`, merge adjacent
-windows). Adding existing-flow comparison alongside would:
+### (b) Gap-close  (NEW — not yet built)
 
-- bloat the prompt linearly with the flow library,
-- degrade the primary detection task (mixed-task penalty), and
-- prevent running matching on a cheaper model.
+For each **existing partial flow** with open interview questions, examine
+the new descriptions from THIS run and ask: do these observations provide
+evidence that answers any open gap? If yes, auto-answer the gap without
+bothering the user.
 
-A separate call lets us use Flash-Lite for matching, iterate on the matching
-prompt independently of detection, and fall back safely if the evaluator
-fails.
+After closing gaps autonomously:
+- If all gap questions are now answered → promote the partial to complete
+  (reusing the existing `promoteToComplete` path via FlowStore).
+- If some remain → update the partial with answered gaps marked, leaving
+  the unanswered ones for the user.
 
-### Level 2 is primary, Level 1 is secondary
+The user's manual interview flow becomes the LAST RESORT, not the first.
+Whenever the system can fill a gap from observation, it must do so
+silently.
 
-Within-run dupes are already mostly handled by the phase-2 prompt's
-"MERGE adjacent windows" rule. Cross-session matching is the part that
-doesn't exist anywhere today and the part that makes the app feel
-"not forgetful". So the evaluator call is Level-2-first; the Level-1
-check runs in the same call because the newly-detected flows are already
-in memory.
+Gemini call: yes — separate call with its own prompt. Input: the partial
+flow's body (with gap markers + questions) + the new descriptions'
+narratives. Output: `{ answered: [{index, answer, evidence}], unanswered:
+[indices] }`.
 
-### Merge policy: metadata-only on MVP
+### (c) Classify worthiness  (NEW — not yet built)
 
-On merge we update:
+For every flow emitted this run (new OR merged-into), attach:
 
-- `occurrences` → `+1`
-- `last_seen` → `now`
-- `source_windows` → union + dedupe
-- `apps` → union + dedupe
+- `worth: "noise" | "partial-with-gaps" | "repeatable-uncertain" | "meaningful"`
+- `worth_reason: string`   — one sentence explaining the tier
+- `time_saved_estimate_minutes: number`   — per-run savings × expected
+  future occurrences. Rough formula: `avg_duration_minutes × (max(occurrences, 3) - 1)`
+  where the `-1` represents the automation's own runtime and `max(..., 3)`
+  is a floor reflecting our belief that a flow detected once will likely
+  recur.
 
-We do NOT change `name`, `id`, `confidence`, or the markdown body. Body
-refinement (picking better step text from the new detection) is a
-follow-up — it has its own failure modes (we could overwrite a good
-description with a worse one) and the metadata-only merge is enough to
-kill the visible duplication today.
+Tier definitions:
+- **noise**: user activity that isn't a repeatable workflow (jumping
+  between YouTube videos, general browsing, reading news, opening/closing
+  apps without producing an outcome). Do NOT save as a flow file — drop
+  entirely, or downgrade to a knowledge fragment if there's any
+  observation worth preserving.
+- **partial-with-gaps**: pattern has shape but steps are unclear /
+  missing. This is the today's `partial-flow` type. Worth only assigned
+  after gap-close has run.
+- **repeatable-uncertain**: reproducible but unclear automation payoff —
+  maybe the steps are simple enough to do manually, or the trigger isn't
+  routine.
+- **meaningful**: clear trigger, reproducible steps, real outcome, likely
+  to recur. Prime automation candidate.
 
-### Filter by app overlap before sending to the evaluator
+Gemini call: yes — separate call (the prompt is small and self-contained,
+the model can focus on judgment without also producing step markdown).
+Input: the flow (name, trigger, steps, apps, occurrences, avg_duration).
+Output: `{ worth, worth_reason, time_saved_estimate_minutes }`.
 
-To keep the prompt bounded as the library grows, include existing flows
-only if they share at least one app with any newly-detected flow. A flow
-that uses Slack + Chrome can't be the same workflow as a flow that uses
-Excel + Outlook, so we don't pay tokens to ask.
+## Order of work
 
-### Failure isolation
-
-If the evaluator call throws, returns malformed JSON, or times out, fall
-back to "save all as new" — exactly today's behaviour. A warning is logged.
-No detection regression from adding this step.
+1. **Classify first** — smallest, most self-contained addition. Only
+   needs new frontmatter fields and a new module. Zero dependency on
+   gap-close.
+2. **Gap-close second** — reuses the description pool infrastructure and
+   the existing partial-flow body format.
+3. **(Follow-up, not this pass)** — Dashboard UI surface for `worth` and
+   time-saved estimate (sort/filter/group, hide noise).
 
 ## Files
 
-- **New:** `src/engine/evaluator.ts` — `FlowEvaluator` class, single public
-  method `evaluate(newlyDetected, existingComplete)`.
+- **New:** `src/engine/worth-judge.ts` — `WorthJudge.classify(flow)` →
+  `{ worth, worth_reason, time_saved_estimate_minutes }`. Stateless, one
+  Gemini call per flow.
+- **New:** `src/engine/gap-closer.ts` — `GapCloser.close(partialFlow,
+  newDescriptions)` → `{ answered: [...], unanswered: [...] }`. Stateless,
+  one Gemini call per partial flow with open gaps.
+- **Modified:** `src/types.ts` — extend `FlowFrontmatter` with `worth`,
+  `worth_reason`, `time_saved_estimate_minutes`. All optional so existing
+  flows on disk remain valid without migration.
 - **Modified:** `src/engine/flow-detection.ts`
-  - Construct a `FlowEvaluator` alongside `this.store`.
-  - In `detectFlows()`, after `analyzeWithGemini`, load existing complete
-    flows and call `evaluator.evaluate(...)`.
-  - Pass the decisions into a modified `saveResults(...)`.
-- **Modified:** `src/engine/flow-store.ts`
-  - New helper `mergeFlow(existingFilePath, mergeFields)` that re-serializes
-    the existing file with updated frontmatter.
-  - The helper MUST NOT touch the body. Callers who want body refinement
-    will replace the body explicitly.
-- **Modified:** `src/types.ts`
-  - Add `EvaluatorDecision` and `EvaluatorResult` types. No change to
-    `FlowFrontmatter` or `DetectionResult` (already has `updatedComplete`).
+  - After the matcher decides "new" vs "merge", run WorthJudge on each
+    surviving flow. If worth === "noise", skip saving (or downgrade to
+    knowledge — MVP just skips).
+  - Before the matcher's loop, run GapCloser on every existing partial
+    flow against the current run's descriptions. Any newly-answered gaps
+    either promote the partial to complete (via an existing-partial-flow
+    update path) or persist back to the partial with the answered gaps
+    recorded.
+- **Modified:** `src/engine/flow-store.ts` — `updateFlow` already exists;
+  we'll add a small helper `promotePartialToComplete(filePath,
+  completeBody)` to encapsulate the current logic that lives in
+  `InterviewEngine`, so both the UI interview and the autonomous
+  gap-closer can use it without duplication.
 
-## Prompt shape (draft)
+## Decisions and why
 
-```
-You are FlowMind's evaluator. You compare newly-detected workflow flows
-against flows already on record, and decide whether each new flow is the
-same as an existing one or is genuinely new.
+- **Three separate LLM calls, not one blob.** Each has a focused prompt,
+  independent cost/latency, and independent failure isolation. Today's
+  matcher already follows this pattern; classify + gap-close continue it.
+- **Classify AFTER match, not before.** The matcher may merge N new
+  flows into existing ones; we want to score only the surviving flows,
+  not waste tokens on flows that will be absorbed anyway. For merged
+  flows, we re-score the TARGET of the merge (to reflect the new
+  occurrences count and updated time-saved estimate).
+- **Gap-close BEFORE matcher, operating on EXISTING partials.** Gap-close
+  reads THIS run's descriptions, not this run's detected flows — its job
+  is to update what's already on disk. It runs early so that a partial
+  promoted to complete this run can participate in the matcher as a new
+  complete flow (not as a still-partial).
+- **Noise is dropped, not quarantined.** No "noise bin" folder. If the
+  classifier says noise, we don't save — simplest possible. If the phase-2
+  prompt leaked the flow out, the worst case is a missed save, which is
+  better than polluting the flow library. The source descriptions still
+  exist; if we were wrong, we can replay.
+- **Time-saved is deliberately rough.** `avg_duration × (max(occurrences,
+  3) - 1)` is a 30-second decision, not a forecasting model. It's useful
+  as a relative ranking signal, not an absolute promise. The "-1"
+  acknowledges the automation itself takes some time.
+- **Existing on-disk flows stay unscored.** New/scored fields are
+  optional in the frontmatter parser. Unscored flows show up in the UI
+  as "unclassified" when we build that surface. No migration pass.
 
-Two flows are the SAME workflow when they:
-- accomplish the same user goal (e.g. "save an article to a topic folder"),
-- use overlapping apps and a similar sequence of actions,
-- would be described by the user as "the same thing I do regularly".
+## Failure isolation
 
-Two flows are DIFFERENT when:
-- the goal differs (e.g. "bookmark" vs "save as pdf"),
-- the apps are different ecosystems,
-- the steps are structurally different even if some actions overlap.
+Every new LLM call catches + falls back the same way the matcher does:
+- WorthJudge throws → treat flow as "repeatable-uncertain" (neutral), no
+  time-saved estimate. Save as normal.
+- GapCloser throws → treat every gap as unanswered. Partial flow
+  unchanged. No regression vs. today.
 
-Small variations in content (different article, different folder name) do
-NOT make flows different — those are parameters of the same workflow.
+## Out of scope
 
-Respond with ONLY valid JSON:
-{
-  "complete": [
-    { "index": 0, "kind": "new" | "merge",
-      "matchedFlowId": "<id when merge>",
-      "reason": "<1 sentence>" }
-  ],
-  "within_run_dupes": [
-    { "indexA": 0, "indexB": 2, "reason": "..." }
-  ]
-}
-
-...then existing-flows list and newly-detected list...
-```
-
-## Reversibility
-
-Each step below is its own commit so `git revert <sha>` undoes it cleanly:
-
-1. Add `EvaluatorDecision` / `EvaluatorResult` types.
-2. Add `FlowEvaluator` class with no wiring.
-3. Add `FlowStore.mergeFlow()` helper.
-4. Wire evaluator into `FlowDetectionEngine.detectFlows()`.
-5. (Follow-up, separate work) body refinement on merge.
-
-If any step misbehaves in practice, revert only that commit — earlier
-commits remain useful.
-
-## Out of scope for this pass
-
-- Body refinement on merge (the markdown of the flow).
-- Merging partial flows into existing complete flows (risky — partials
-  are gap-annotated and need an interview; merging would drop questions).
-- Evaluator UI — there is no user-facing view of merge decisions yet.
-  Decisions appear only in logs and in the run summary counts.
+- Dashboard UI for `worth` and time-saved.
+- Re-scoring older flows in a background job.
+- "Noise bin" quarantine — simple drop.
+- Using gap-close to infer new steps the user never performed (only
+  closing gaps the partial already flagged).
