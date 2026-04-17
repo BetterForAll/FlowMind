@@ -51,8 +51,11 @@ const api = {
     ipcRenderer.invoke("automations:revealInExplorer", filePath),
   deleteAutomation: (filePath: string) =>
     ipcRenderer.invoke("automations:delete", filePath),
-  runAutomation: (filePath: string, format: "python" | "nodejs") =>
-    ipcRenderer.invoke("automations:run", filePath, format),
+  runAutomation: (
+    filePath: string,
+    format: "python" | "nodejs",
+    params?: Record<string, string>
+  ) => ipcRenderer.invoke("automations:run", filePath, format, params),
   killAutomation: (runId: string) =>
     ipcRenderer.invoke("automations:kill", runId),
   sendInputToAutomation: (runId: string, text: string) =>

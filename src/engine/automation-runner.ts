@@ -80,7 +80,15 @@ export class AutomationRunner extends EventEmitter {
   run(
     filePath: string,
     format: "python" | "nodejs",
-    timeoutMs: number = DEFAULT_TIMEOUT_MS
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    /**
+     * Parameter values to pass to the script. Each key becomes a
+     * `--<name> <value>` CLI argument AND is exported as an env var named
+     * FLOWMIND_PARAM_<NAME_UPPER>. This dual-channel makes it easy for the
+     * generated script to read them whichever way the LLM chose (argparse,
+     * os.getenv, etc.). Empty object → no params, no args, no env vars.
+     */
+    params: Record<string, string> = {}
   ): string {
     // Security: only run files that live inside ~/flowtracker/automations.
     const resolved = path.resolve(filePath);
@@ -94,6 +102,19 @@ export class AutomationRunner extends EventEmitter {
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
 
+    // Build the final argv + env to hand to the child. Params go in BOTH
+    // channels (flags and env vars) so the generated script can read them
+    // using whichever API the LLM chose.
+    const paramArgs: string[] = [];
+    for (const [name, value] of Object.entries(params)) {
+      paramArgs.push(`--${name}`, value);
+    }
+    const paramEnv: Record<string, string> = {};
+    for (const [name, value] of Object.entries(params)) {
+      const envKey = `FLOWMIND_PARAM_${name.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
+      paramEnv[envKey] = value;
+    }
+
     // Log file location: <automations>/logs/<script-slug>/<format>-<timestamp>.log.
     // We extract the flow-slug from the script filename, which follows
     // FlowStore.saveAutomation's "<slug>-<format>.<ext>" convention.
@@ -105,23 +126,27 @@ export class AutomationRunner extends EventEmitter {
       `${format}-${startedAtIso.replace(/[:.]/g, "-")}.log`
     );
     const logStream = fs.createWriteStream(logFilePath, { encoding: "utf-8" });
+    const paramSummary = paramArgs.length > 0 ? ` ${paramArgs.map(a => a.includes(" ") ? `"${a}"` : a).join(" ")}` : "";
     logStream.write(
       [
         `# FlowMind automation run log`,
         `# script: ${resolved}`,
         `# format: ${format}`,
-        `# command: ${command.bin} ${command.args.join(" ")} ${resolved}`.trim(),
+        `# command: ${command.bin} ${command.args.join(" ")} ${resolved}${paramSummary}`.trim(),
         `# cwd: ${cwd}`,
         `# started: ${startedAtIso}`,
         `# run_id: ${runId}`,
+        ...(Object.keys(params).length > 0
+          ? [`# params: ${JSON.stringify(params)}`]
+          : []),
         ``,
         ``,
       ].join("\n")
     );
 
-    const child = spawn(command.bin, [...command.args, resolved], {
+    const child = spawn(command.bin, [...command.args, resolved, ...paramArgs], {
       cwd,
-      env: process.env,
+      env: { ...process.env, ...paramEnv },
       // Inherit shell? No — direct spawn is simpler and safer. Scripts that
       // need shell features should use subprocess.shell=True inside the
       // script itself.

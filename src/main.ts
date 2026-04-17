@@ -382,12 +382,17 @@ function setupIPC(): void {
 
   ipcMain.handle(
     "automations:run",
-    async (_e, filePath: string, format: "python" | "nodejs") => {
+    async (
+      _e,
+      filePath: string,
+      format: "python" | "nodejs",
+      params?: Record<string, string>
+    ) => {
       if (format !== "python" && format !== "nodejs") {
         throw new Error(`Run is only supported for python and nodejs automations (got ${format})`);
       }
       // AutomationRunner validates the path; throwing bubbles up to the renderer.
-      return { runId: automationRunner.run(filePath, format) };
+      return { runId: automationRunner.run(filePath, format, undefined, params ?? {}) };
     }
   );
 
