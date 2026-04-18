@@ -93,6 +93,28 @@ function createWindow(): void {
     },
   });
 
+  // Mirror renderer console output to ~/flowtracker/debug.log so the
+  // assistant can Read it directly without the user copy-pasting from
+  // DevTools. Only captures renderer logs (renderer's console.log
+  // doesn't reach the main-process terminal by default). Removed once
+  // the form-typing diagnosis is done.
+  const debugLogPath = path.join(require("node:os").homedir(), "flowtracker", "debug.log");
+  try {
+    require("node:fs").mkdirSync(require("node:path").dirname(debugLogPath), { recursive: true });
+    require("node:fs").appendFileSync(
+      debugLogPath,
+      `\n=== FlowMind started ${new Date().toISOString()} ===\n`
+    );
+  } catch { /* best-effort */ }
+  mainWindow.webContents.on("console-message", (_event, level, message) => {
+    if (!message.includes("[FlowMind/debug]")) return;
+    const levelName = ["DEBUG", "INFO", "WARN", "ERROR"][level] ?? `L${level}`;
+    const ts = new Date().toISOString();
+    try {
+      require("node:fs").appendFileSync(debugLogPath, `[${ts}] [${levelName}] ${message}\n`);
+    } catch { /* best-effort */ }
+  });
+
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   } else {
