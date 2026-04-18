@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { FlowDocument, InterviewQuestion, AutomationFile, FlowWorth, FlowParameter } from "../../types";
 import type { DescriptionDocument } from "../../engine/description-store";
 import type { RunLogEntry } from "../../engine/flow-store";
@@ -62,6 +62,25 @@ function encodePath(p: string): string {
 function truncateForDisplay(s: string): string {
   const MAX = 400;
   return s.length > MAX ? s.slice(0, MAX) + "…" : s;
+}
+
+/**
+ * Turn a programmatic parameter name (`articleSubject`, `article_subject`,
+ * `article-subject`) into a human-readable label ("Article Subject"). Used
+ * for the parameter form so the user sees prose, with the raw flag name
+ * shown smaller next to it as the source-of-truth identifier.
+ */
+function humanizeParamName(name: string): string {
+  return name
+    // Split camelCase: "articleSubject" → "article Subject"
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    // Underscores and dashes become spaces
+    .replace(/[_-]+/g, " ")
+    // Collapse whitespace and Title-Case each word
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
 }
 
 type AutomationFormat = "python" | "nodejs" | "claude-skill" | "tutorial";
@@ -814,7 +833,16 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    * normalised, so "article-subject" / "articleSubject" / "article_subject"
    * all align with a flow parameter named "article_subject".
    */
-  const formParameters = useCallback((): FlowParameter[] => {
+  /**
+   * Memoized parameter list. Was previously a useCallback that we
+   * INVOKED multiple times per render (in the conditional, the JSX
+   * map, the disabled prop) — each invocation re-ran a regex scan
+   * over the script source. With pip's install output also re-rendering
+   * 500+ lines on every keystroke, the renderer was spending all its
+   * time recomputing instead of accepting input. useMemo caches the
+   * VALUE so each render reads it once for free.
+   */
+  const formParams = useMemo<FlowParameter[]>(() => {
     const format = activeTab;
     if (format !== "python" && format !== "nodejs") return [];
     const scriptContent = automationContent[format];
@@ -864,7 +892,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     if (!ok) return;
     // Gate on params — same treatment as the script runner so the agent
     // doesn't have to ask_user for values the flow already knows.
-    const params = formParameters();
+    const params = formParams;
     if (params.length > 0) {
       setParamDraft((prev) => {
         const next = { ...prev };
@@ -963,7 +991,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       return;
     }
 
-    const params = formParameters();
+    const params = formParams;
     if (params.length > 0) {
       setParamDraft((prev) => {
         const next = { ...prev };
@@ -1021,7 +1049,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `On agent success, a fresh script is saved so the next run is cheap again.`
     );
     if (!ok) return;
-    const params = formParameters();
+    const params = formParams;
     if (params.length > 0) {
       setParamDraft((prev) => {
         const next = { ...prev };
@@ -1059,7 +1087,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
 
   /** Open the parameter entry form (if the script/flow has params) or run straight. */
   const startRun = (a: AutomationFile) => {
-    const params = formParameters();
+    const params = formParams;
     if (params.length > 0) {
       // Seed draft with existing values (so re-running keeps last entry) or
       // the first observed_value as a suggestion.
@@ -1663,7 +1691,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                 </div>
 
                 {/* Parameter entry form — appears after clicking Run when the script declares CLI args (detected directly from the script) or the flow has parameters metadata. Collects values upfront so the script runs non-interactively. */}
-                {paramFormOpen && formParameters().length > 0 && (
+                {paramFormOpen && formParams.length > 0 && (
                   <div
                     style={{
                       marginBottom: 12,
@@ -1680,10 +1708,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       Fill in the values. The script will run with each parameter passed as a CLI flag (e.g. <code>--subject Octopus</code>) and as a FLOWMIND_PARAM_* env var.
                     </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                      {formParameters().map((param, idx) => (
+                      {formParams.map((param, idx) => (
                         <div key={param.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          <label style={{ fontSize: 12, fontWeight: 500 }}>
-                            <code>--{param.name}</code>
+                          <label style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "baseline", gap: 8 }}>
+                            <span>{humanizeParamName(param.name)}</span>
+                            <code style={{ fontSize: 11, fontWeight: 400, color: "var(--text-muted)" }}>
+                              --{param.name}
+                            </code>
                           </label>
                           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
                             {param.description}
@@ -1757,7 +1788,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                         }}
                         disabled={
                           !!activeRun ||
-                          !(formParameters().every(
+                          !(formParams.every(
                             (p) => (paramDraft[p.name] ?? "").trim().length > 0
                           ))
                         }
