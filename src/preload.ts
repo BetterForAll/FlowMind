@@ -78,6 +78,10 @@ const api = {
   // Stage 3 — desktop helper readiness + install
   checkDesktopReady: () => ipcRenderer.invoke("automations:checkDesktopReady"),
   installDesktopDeps: () => ipcRenderer.invoke("automations:installDesktopDeps"),
+  /** Re-focus the main BrowserWindow + its webContents. Workaround for
+   *  Electron's Windows focus-loss quirk after native confirm() dialogs
+   *  and subprocess-spawning IPCs. */
+  focusMainWindow: () => ipcRenderer.invoke("window:focusMain"),
   killAutomation: (runId: string) =>
     ipcRenderer.invoke("automations:kill", runId),
   sendInputToAutomation: (runId: string, text: string) =>

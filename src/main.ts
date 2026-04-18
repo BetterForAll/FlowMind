@@ -586,6 +586,21 @@ function setupIPC(): void {
     }
   );
 
+  // Force keyboard focus back to the main window. After window.confirm()
+  // and certain IPC roundtrips that spawn subprocesses (Python helper,
+  // pip), Electron on Windows sometimes leaves the renderer without
+  // input focus — the window looks active but clicks/keys aren't routed
+  // to the document. The workaround the user discovered (alt-tab away
+  // and back) just resets OS-level focus. This IPC does the same thing
+  // explicitly.
+  ipcMain.handle("window:focusMain", async () => {
+    if (!mainWindow) return { focused: false };
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    mainWindow.webContents.focus();
+    return { focused: true };
+  });
+
   // Resolve a pending ask_user prompt from the renderer.
   ipcMain.handle("automations:answerAgentPrompt", async (_e, promptId: string, answer: string) => {
     const resolve = pendingAgentPrompts.get(promptId);

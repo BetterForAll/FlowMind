@@ -366,13 +366,19 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
 
   // Same idea for the parameter form: when it opens, focus the first
   // input immediately so the user can type without first clicking. Also
-  // clear any stale agent ask_user prompt — its autoFocus input would
-  // otherwise grab focus on the next render and leave the form looking
-  // unresponsive even though it's clearly visible.
+  // clear any stale agent ask_user prompt and re-focus the BrowserWindow
+  // (Windows confirm()/IPC quirk) so keystrokes actually reach the
+  // renderer at all. Without the window focus restore, the input was
+  // visibly highlighted but unresponsive until the user alt-tabbed away
+  // and back.
   useEffect(() => {
     if (paramFormOpen) {
       setAgentPrompt(null);
-      firstParamInputRef.current?.focus();
+      // Run after paint so React has committed and the input is in the DOM.
+      requestAnimationFrame(() => {
+        window.flowmind.focusMainWindow();
+        firstParamInputRef.current?.focus();
+      });
     }
   }, [paramFormOpen]);
 
@@ -740,6 +746,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     if (isRegenerate) {
       const ok = confirm(`Replace the existing ${format} automation for this flow?`);
       if (!ok) return;
+      window.flowmind.focusMainWindow();
     }
     setGenerating(true);
     setGenerateError(null);
@@ -785,6 +792,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `Runs have a 5-minute hard timeout. You can kill a run at any time.`
     );
     if (!ok) return;
+    // Restore focus after the native confirm dialog (Electron Windows quirk).
+    window.flowmind.focusMainWindow();
     setRunOutput([]);
     setRunExitCode(null);
     setRunError(null);
@@ -890,6 +899,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `and saved as the primary automation for this flow.`
     );
     if (!ok) return;
+    // Restore focus after the native confirm dialog (Electron Windows quirk).
+    window.flowmind.focusMainWindow();
     // Drop prior install/script output before opening the form — see
     // startAgentRunWithAllTools for the full reason.
     setRunOutput([]);
@@ -980,6 +991,10 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           `with this flow.`
       );
       if (!ok) return;
+      // Restore renderer focus — confirm() leaves the window without
+      // keyboard focus on Windows, which makes the form unresponsive
+      // until the user alt-tabs away and back.
+      window.flowmind.focusMainWindow();
     }
     // Drop the prior install's run-output before doing anything else.
     // Otherwise the param form opens with hundreds of cached pip-output
@@ -1001,6 +1016,9 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         pythonAvailable: boolean;
         missing: string[];
       };
+      // Restore focus — the IPC just spawned a Python subprocess which
+      // can pull keyboard focus on Windows even with windowsHide:true.
+      window.flowmind.focusMainWindow();
       setDesktopReady(status);
       if (!status.ready) {
         setPendingLevel2Launch(a);
@@ -1074,6 +1092,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `On agent success, a fresh script is saved so the next run is cheap again.`
     );
     if (!ok) return;
+    // Restore focus after the native confirm dialog (Electron Windows quirk).
+    window.flowmind.focusMainWindow();
     // Drop prior install/script output before opening the form — see
     // startAgentRunWithAllTools for the full reason.
     setRunOutput([]);
@@ -1186,6 +1206,8 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `This will modify your ${a.format === "python" ? "Python environment" : "local node_modules"}.`
     );
     if (!ok) return;
+    // Restore focus after the native confirm dialog (Electron Windows quirk).
+    window.flowmind.focusMainWindow();
     setRunOutput([]);
     setRunExitCode(null);
     setRunError(null);
