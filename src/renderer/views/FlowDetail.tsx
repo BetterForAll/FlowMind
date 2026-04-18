@@ -364,6 +364,27 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     }
   }, [runStatus, activeRun]);
 
+  // Debug-only: watch window focus events so we can see if the renderer
+  // is losing focus mid-flow. Fires on Electron's blur/focus IPCs from
+  // the OS. Comment out once the form-typing issue is solved.
+  useEffect(() => {
+    const onWindowFocus = () => console.log("[FlowMind/debug] window focus");
+    const onWindowBlur = () => console.log("[FlowMind/debug] window blur");
+    const onDocVisChange = () =>
+      console.log("[FlowMind/debug] visibility change", {
+        state: document.visibilityState,
+        docHasFocus: document.hasFocus(),
+      });
+    window.addEventListener("focus", onWindowFocus);
+    window.addEventListener("blur", onWindowBlur);
+    document.addEventListener("visibilitychange", onDocVisChange);
+    return () => {
+      window.removeEventListener("focus", onWindowFocus);
+      window.removeEventListener("blur", onWindowBlur);
+      document.removeEventListener("visibilitychange", onDocVisChange);
+    };
+  }, []);
+
   // Same idea for the parameter form: when it opens, focus the first
   // input immediately so the user can type without first clicking. Also
   // clear any stale agent ask_user prompt and re-focus the BrowserWindow
@@ -372,12 +393,29 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   // visibly highlighted but unresponsive until the user alt-tabbed away
   // and back.
   useEffect(() => {
+    console.log("[FlowMind/debug] paramFormOpen effect", {
+      paramFormOpen,
+      docHasFocus: document.hasFocus(),
+      activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+    });
     if (paramFormOpen) {
       setAgentPrompt(null);
       // Run after paint so React has committed and the input is in the DOM.
       requestAnimationFrame(() => {
-        window.flowmind.focusMainWindow();
-        firstParamInputRef.current?.focus();
+        window.flowmind.focusMainWindow().then((r) => {
+          console.log("[FlowMind/debug] post-RAF focusMainWindow done", {
+            r,
+            docHasFocus: document.hasFocus(),
+            inputPresent: !!firstParamInputRef.current,
+            activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+          });
+          firstParamInputRef.current?.focus();
+          console.log("[FlowMind/debug] after firstParamInput.focus()", {
+            activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+            activeElIsOurInput:
+              document.activeElement === firstParamInputRef.current,
+          });
+        });
       });
     }
   }, [paramFormOpen]);
@@ -979,6 +1017,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
    * and shouldn't have to click through the dialog a second time.
    */
   const startAgentRunWithAllTools = async (a: AutomationFile, _skipConfirm = false) => {
+    console.log("[FlowMind/debug] startAgentRunWithAllTools entry", {
+      filename: a.filename,
+      format: a.format,
+      _skipConfirm,
+      docHasFocus: document.hasFocus(),
+      activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+    });
     if (a.format !== "python" && a.format !== "nodejs") return;
     if (!_skipConfirm) {
       const ok = confirm(
@@ -990,11 +1035,21 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
           `Tip: turn on "Approve each step" if this is your first try ` +
           `with this flow.`
       );
+      console.log("[FlowMind/debug] confirm() returned", {
+        ok,
+        docHasFocus: document.hasFocus(),
+        activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+      });
       if (!ok) return;
       // Restore renderer focus — confirm() leaves the window without
       // keyboard focus on Windows, which makes the form unresponsive
       // until the user alt-tabs away and back.
-      window.flowmind.focusMainWindow();
+      const fr = await window.flowmind.focusMainWindow();
+      console.log("[FlowMind/debug] focusMainWindow result", {
+        fr,
+        docHasFocus: document.hasFocus(),
+        activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+      });
     }
     // Drop the prior install's run-output before doing anything else.
     // Otherwise the param form opens with hundreds of cached pip-output
@@ -1016,9 +1071,18 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         pythonAvailable: boolean;
         missing: string[];
       };
+      console.log("[FlowMind/debug] checkDesktopReady returned", {
+        status,
+        docHasFocus: document.hasFocus(),
+        activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+      });
       // Restore focus — the IPC just spawned a Python subprocess which
       // can pull keyboard focus on Windows even with windowsHide:true.
-      window.flowmind.focusMainWindow();
+      await window.flowmind.focusMainWindow();
+      console.log("[FlowMind/debug] post-readiness focusMainWindow done", {
+        docHasFocus: document.hasFocus(),
+        activeElTag: (document.activeElement as HTMLElement | null)?.tagName,
+      });
       setDesktopReady(status);
       if (!status.ready) {
         setPendingLevel2Launch(a);
@@ -1783,9 +1847,40 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                             ref={idx === 0 ? firstParamInputRef : undefined}
                             type="text"
                             value={paramDraft[param.name] ?? ""}
-                            onChange={(e) =>
-                              setParamDraft((prev) => ({ ...prev, [param.name]: e.target.value }))
-                            }
+                            onChange={(e) => {
+                              console.log("[FlowMind/debug] input onChange", {
+                                name: param.name,
+                                value: e.target.value,
+                              });
+                              setParamDraft((prev) => ({ ...prev, [param.name]: e.target.value }));
+                            }}
+                            onClick={() => {
+                              console.log("[FlowMind/debug] input onClick", {
+                                name: param.name,
+                                docHasFocus: document.hasFocus(),
+                                activeElIsOurInput:
+                                  document.activeElement ===
+                                  (idx === 0 ? firstParamInputRef.current : null),
+                              });
+                            }}
+                            onFocus={() => {
+                              console.log("[FlowMind/debug] input onFocus", {
+                                name: param.name,
+                                docHasFocus: document.hasFocus(),
+                              });
+                            }}
+                            onBlur={() => {
+                              console.log("[FlowMind/debug] input onBlur", {
+                                name: param.name,
+                                relatedTag: (document.activeElement as HTMLElement | null)?.tagName,
+                              });
+                            }}
+                            onKeyDown={(e) => {
+                              console.log("[FlowMind/debug] input onKeyDown", {
+                                name: param.name,
+                                key: e.key,
+                              });
+                            }}
                             placeholder={param.observed_values?.[0] ?? `Enter ${param.name}...`}
                             style={{
                               padding: "6px 10px",
