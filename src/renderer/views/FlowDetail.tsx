@@ -890,6 +890,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `and saved as the primary automation for this flow.`
     );
     if (!ok) return;
+    // Drop prior install/script output before opening the form — see
+    // startAgentRunWithAllTools for the full reason.
+    setRunOutput([]);
+    setRunStatus("idle");
+    setRunExitCode(null);
+    setRunError(null);
+    setRunMissingInterpreter(null);
     // Gate on params — same treatment as the script runner so the agent
     // doesn't have to ask_user for values the flow already knows.
     const params = formParams;
@@ -920,6 +927,15 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
     setAgentSteps([]);
     setAgentPrompt(null);
     setAgentPromptAnswer("");
+    // Wipe run-output state from any prior install / script run. With
+    // 500+ lines of pip output sitting in runOutput, every keystroke in
+    // the param form re-renders all those spans and locks up the UI.
+    // This is the primary fix for "form is open but I can't type."
+    setRunOutput([]);
+    setRunStatus("idle");
+    setRunExitCode(null);
+    setRunError(null);
+    setRunMissingInterpreter(null);
     try {
       const result = (await window.flowmind.runAsAgent(
         flowId,
@@ -965,6 +981,15 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       );
       if (!ok) return;
     }
+    // Drop the prior install's run-output before doing anything else.
+    // Otherwise the param form opens with hundreds of cached pip-output
+    // spans still rendering on every keystroke, which feels like the
+    // form is locked.
+    setRunOutput([]);
+    setRunStatus("idle");
+    setRunExitCode(null);
+    setRunError(null);
+    setRunMissingInterpreter(null);
 
     // Readiness check — Python + pywinauto + uiautomation + pyautogui +
     // pillow all need to be importable. If anything's missing, surface
@@ -1049,6 +1074,13 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
         `On agent success, a fresh script is saved so the next run is cheap again.`
     );
     if (!ok) return;
+    // Drop prior install/script output before opening the form — see
+    // startAgentRunWithAllTools for the full reason.
+    setRunOutput([]);
+    setRunStatus("idle");
+    setRunExitCode(null);
+    setRunError(null);
+    setRunMissingInterpreter(null);
     const params = formParams;
     if (params.length > 0) {
       setParamDraft((prev) => {
@@ -1087,6 +1119,12 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
 
   /** Open the parameter entry form (if the script/flow has params) or run straight. */
   const startRun = (a: AutomationFile) => {
+    // Drop prior install/script output so the form is responsive.
+    setRunOutput([]);
+    setRunStatus("idle");
+    setRunExitCode(null);
+    setRunError(null);
+    setRunMissingInterpreter(null);
     const params = formParams;
     if (params.length > 0) {
       // Seed draft with existing values (so re-running keeps last entry) or
