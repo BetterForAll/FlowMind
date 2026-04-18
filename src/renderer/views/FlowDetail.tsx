@@ -123,6 +123,11 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
   // the script. One draft map per flow; keys are the parameter names.
   const [paramDraft, setParamDraft] = useState<Record<string, string>>({});
   const [paramFormOpen, setParamFormOpen] = useState(false);
+  /** Ref to the first param input — focused by an effect when the form
+   *  opens so the user can start typing immediately without clicking.
+   *  Defends against focus theft from late-arriving panels (stale agent
+   *  prompts, run-output stdin) that compete for focus on render. */
+  const firstParamInputRef = useRef<HTMLInputElement>(null);
   // Auto-fix progress across a chain of retries. `phase` drives the visible
   // status; `attempt` is 1-indexed (1 = original run, 2+ = auto-fix retries).
   // `diagnosis` is the doctor's most recent explanation; `previousError` is
@@ -339,6 +344,18 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
       stdinInputRef.current?.focus();
     }
   }, [runStatus, activeRun]);
+
+  // Same idea for the parameter form: when it opens, focus the first
+  // input immediately so the user can type without first clicking. Also
+  // clear any stale agent ask_user prompt — its autoFocus input would
+  // otherwise grab focus on the next render and leave the form looking
+  // unresponsive even though it's clearly visible.
+  useEffect(() => {
+    if (paramFormOpen) {
+      setAgentPrompt(null);
+      firstParamInputRef.current?.focus();
+    }
+  }, [paramFormOpen]);
 
   // Subscribe to automation run events once on mount.
   useEffect(() => {
@@ -621,6 +638,11 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
             ]);
             setSmartRunMode(false);
           }
+          // Defensive: clear any in-flight ask_user prompt. Without this,
+          // a prompt that the agent posted but never resolved (e.g. agent
+          // crashed before answer) would linger and steal focus from the
+          // next form/run via its autoFocus input.
+          setAgentPrompt(null);
           return {
             ...curr,
             status: ev.success ? (curr.synthesizedPath ? "saved" : "synthesizing") : "failed",
@@ -631,6 +653,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
             setSmartRunTrail((prev) => [...prev, `Agent crashed: ${ev.error}`]);
             setSmartRunMode(false);
           }
+          setAgentPrompt(null);
           return { ...curr, status: "failed", reason: ev.error };
         } else if (ev.type === "agent_trace_saved") {
           if (flow?.frontmatter.name) loadAutomations(flow.frontmatter.name);
@@ -1657,7 +1680,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                       Fill in the values. The script will run with each parameter passed as a CLI flag (e.g. <code>--subject Octopus</code>) and as a FLOWMIND_PARAM_* env var.
                     </div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                      {formParameters().map((param) => (
+                      {formParameters().map((param, idx) => (
                         <div key={param.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                           <label style={{ fontSize: 12, fontWeight: 500 }}>
                             <code>--{param.name}</code>
@@ -1666,6 +1689,7 @@ export function FlowDetail({ flowId, onBack, onDataChanged }: FlowDetailProps) {
                             {param.description}
                           </div>
                           <input
+                            ref={idx === 0 ? firstParamInputRef : undefined}
                             type="text"
                             value={paramDraft[param.name] ?? ""}
                             onChange={(e) =>
